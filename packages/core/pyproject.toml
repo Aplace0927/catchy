@@ -1,0 +1,21 @@
+[project]
+name = "catchy-core"
+version = "0.1.0"
+description = ""
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = []
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.package-dir]
+"" = "."
+
+[tool.setuptools.packages.find]
+include = ["catchy.core*"]
+namespaces = true
+
+[tool.setuptools.package-data]
+"*" = ["py.typed"]

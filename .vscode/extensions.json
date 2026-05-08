@@ -1,0 +1,10 @@
+{
+    "recommendations": [
+        "charliermarsh.ruff",
+        "DavidAnson.vscode-markdownlint",
+        "streetsidesoftware.code-spell-checker",
+        "tamasfe.even-better-toml",
+        "ms-python.vscode-pylance",
+        "esbenp.prettier-vscode",
+    ]
+}

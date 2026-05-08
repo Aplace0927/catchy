@@ -1,0 +1,22 @@
+[project]
+name = "catchy"
+version = "0.1.0"
+description = ""
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = []
+
+[tool.uv.workspace]
+members = ["packages/core"]
+
+[tool.uv.sources]
+catchy-core = { workspace = true }
+
+[tool.pyright]
+include = ["packages/core"]
+extraPaths = ["packages/core"]
+venvPath = "."
+venv = ".venv"
+pythonVersion = "3.14"
+useLibraryCodeForTypes = true
+typeCheckingMode = "strict"

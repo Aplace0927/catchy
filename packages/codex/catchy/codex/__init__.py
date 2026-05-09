@@ -141,7 +141,7 @@ Useful tools are already installed in this container:
 <challenge-description>{challenge.description}</challenge-description>"""
 
                 if webhook is not None:
-                    prompt += f"""When you have any findings or trial and errors to share, send them to the webhook at {webhook.url}. Prefer to send messages in {webhook.preferred_language or "English"}."""
+                    prompt += f"""Frequently share any findings or trial and errors to the webhook at {webhook.url} in {webhook.preferred_language or "English"}."""
 
                 turn = await thread.turn(TextInput(prompt))
 

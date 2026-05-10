@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
@@ -15,6 +16,7 @@ from catchy.web.ctf.models import (
     Challenge,
     Ctf,
     Secret,
+    SteeringMessage,
     StreamEvent,
     Thread,
 )
@@ -197,6 +199,14 @@ class StreamEventRecordingTests(TestCase):
         self.assertEqual(event.sequence, 1)
         self.assertEqual(event.text, "hello")
 
+    def test_thread_root_reuses_existing_root_when_resuming(self) -> None:
+        self.thread.thread_root = "/tmp/catchy-existing-thread"
+
+        self.assertEqual(
+            services._thread_root(self.thread),
+            Path("/tmp/catchy-existing-thread"),
+        )
+
 
 class PublicThreadAccessTests(TestCase):
     def setUp(self) -> None:
@@ -275,6 +285,15 @@ class PublicThreadAccessTests(TestCase):
         self.assertContains(response, "Unpublish")
         self.assertNotContains(response, ">Publish</button>")
 
+    def test_completed_thread_detail_shows_steering_form_to_manager(self) -> None:
+        thread = self._create_thread("steerable", is_public=False)
+        self.client.force_login(self.user)
+
+        response = self.client.get(thread.get_absolute_url())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'id="steer-form"')
+
     def test_authenticated_user_can_publish_and_unpublish_thread(self) -> None:
         thread = self._create_thread("publishable", is_public=False)
         self.client.force_login(self.user)
@@ -294,6 +313,44 @@ class PublicThreadAccessTests(TestCase):
         thread.refresh_from_db()
         self.assertRedirects(response, thread.get_absolute_url())
         self.assertFalse(thread.is_public)
+
+    def test_steering_completed_thread_queues_message_and_restarts_worker(self) -> None:
+        thread = self._create_thread("resume-completed", is_public=False)
+        thread.error = "old stop"
+        thread.thread_root = "/tmp/catchy-existing-thread"
+        thread.save(update_fields=["error", "thread_root", "updated_at"])
+        self.client.force_login(self.user)
+
+        with patch("catchy.web.ctf.views.start_thread") as start_thread:
+            response = self.client.post(
+                reverse("ctf:thread_steer", kwargs={"pk": thread.pk}),
+                {"text": "try the other path"},
+            )
+
+        thread.refresh_from_db()
+        self.assertRedirects(response, thread.get_absolute_url())
+        self.assertEqual(thread.status, Thread.Status.QUEUED)
+        self.assertEqual(thread.error, "")
+        self.assertEqual(thread.steering_messages.get().text, "try the other path")
+        self.assertEqual(start_thread.call_args.args[0].pk, thread.pk)
+
+    def test_steering_running_thread_does_not_restart_worker(self) -> None:
+        thread = self._create_thread("steer-running", is_public=False)
+        thread.status = Thread.Status.RUNNING
+        thread.save(update_fields=["status", "updated_at"])
+        self.client.force_login(self.user)
+
+        with patch("catchy.web.ctf.views.start_thread") as start_thread:
+            response = self.client.post(
+                reverse("ctf:thread_steer", kwargs={"pk": thread.pk}),
+                {"text": "keep going"},
+            )
+
+        thread.refresh_from_db()
+        self.assertRedirects(response, thread.get_absolute_url())
+        self.assertEqual(thread.status, Thread.Status.RUNNING)
+        self.assertEqual(SteeringMessage.objects.get(thread=thread).text, "keep going")
+        start_thread.assert_not_called()
 
     def test_thread_detail_includes_cumulative_token_count_cost(self) -> None:
         thread = self._create_thread("costed", is_public=True)

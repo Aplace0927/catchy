@@ -13,6 +13,7 @@ from django.core.exceptions import PermissionDenied
 from django.db.models import Q, QuerySet
 from django.http import HttpRequest, HttpResponse, StreamingHttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
+from django.utils import timezone
 from django.views.decorators.http import require_POST
 
 from .forms import (
@@ -383,10 +384,11 @@ def thread_steer(request: HttpRequest, pk: int) -> HttpResponse:
     if not text:
         messages.error(request, "Steer message cannot be empty.")
         return redirect(thread)
-    if thread.status not in {Thread.Status.QUEUED, Thread.Status.RUNNING}:
-        messages.error(
-            request, "Only queued or running threads can receive steer messages."
-        )
+    active_statuses = {Thread.Status.QUEUED, Thread.Status.RUNNING}
+    stopped_statuses = {Thread.Status.COMPLETED, Thread.Status.FAILED}
+    should_resume = thread.status in stopped_statuses
+    if thread.status not in active_statuses | stopped_statuses:
+        messages.error(request, "This thread cannot receive steer messages.")
         return redirect(thread)
 
     SteeringMessage.objects.create(
@@ -394,7 +396,18 @@ def thread_steer(request: HttpRequest, pk: int) -> HttpResponse:
         created_by=request.user,
         text=text,
     )
-    messages.success(request, "Steer message queued.")
+    if should_resume:
+        Thread.objects.filter(pk=thread.pk, status__in=stopped_statuses).update(
+            status=Thread.Status.QUEUED,
+            error="",
+            updated_at=timezone.now(),
+        )
+        thread.status = Thread.Status.QUEUED
+        thread.error = ""
+        start_thread(thread)
+        messages.success(request, "Steer message queued; thread is resuming.")
+    else:
+        messages.success(request, "Steer message queued.")
     return redirect(thread)
 
 

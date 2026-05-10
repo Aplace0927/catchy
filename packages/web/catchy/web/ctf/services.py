@@ -441,6 +441,8 @@ def _agent_model_name(
 
 
 def _thread_root(thread: Thread) -> Path:
+    if thread.thread_root:
+        return Path(thread.thread_root)
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     return Path(settings.MEDIA_ROOT) / "threads" / f"thread-{thread.pk}-{timestamp}"
 

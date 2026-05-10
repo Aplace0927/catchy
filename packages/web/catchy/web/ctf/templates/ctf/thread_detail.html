@@ -67,32 +67,30 @@
   {% endif %}
 
   {% if can_manage_thread %}
-    {% if thread.status == "queued" or thread.status == "running" %}
-      <form class="steer-floating" id="steer-form" action="{% url 'ctf:thread_steer' thread.pk %}" method="post">
-        {% csrf_token %}
-        <textarea name="text" rows="1" required placeholder="steer the agent…" id="steer-text"></textarea>
-        <button type="submit" class="steer-send" aria-label="Send" title="Send">↑</button>
-      </form>
-      <script>
-        (function () {
-          document.body.classList.add("has-steer");
-          const ta = document.getElementById("steer-text");
-          const form = document.getElementById("steer-form");
-          function autoGrow() {
-            ta.style.height = "auto";
-            ta.style.height = Math.min(ta.scrollHeight, 200) + "px";
+    <form class="steer-floating" id="steer-form" action="{% url 'ctf:thread_steer' thread.pk %}" method="post">
+      {% csrf_token %}
+      <textarea name="text" rows="1" required placeholder="steer the agent…" id="steer-text"></textarea>
+      <button type="submit" class="steer-send" aria-label="Send" title="Send">↑</button>
+    </form>
+    <script>
+      (function () {
+        document.body.classList.add("has-steer");
+        const ta = document.getElementById("steer-text");
+        const form = document.getElementById("steer-form");
+        function autoGrow() {
+          ta.style.height = "auto";
+          ta.style.height = Math.min(ta.scrollHeight, 200) + "px";
+        }
+        ta.addEventListener("input", autoGrow);
+        ta.addEventListener("keydown", (e) => {
+          if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            if (ta.value.trim()) form.submit();
           }
-          ta.addEventListener("input", autoGrow);
-          ta.addEventListener("keydown", (e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              if (ta.value.trim()) form.submit();
-            }
-          });
-          autoGrow();
-        })();
-      </script>
-    {% endif %}
+        });
+        autoGrow();
+      })();
+    </script>
   {% endif %}
 
   <section class="reveal">

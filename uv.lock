@@ -57,6 +57,7 @@ dependencies = [
     { name = "catchy-core" },
     { name = "docker" },
     { name = "jinja2" },
+    { name = "omegaconf" },
     { name = "openai-codex-app-server-sdk" },
 ]
 
@@ -65,6 +66,7 @@ requires-dist = [
     { name = "catchy-core", editable = "packages/core" },
     { name = "docker", specifier = ">=7.1.0" },
     { name = "jinja2", specifier = ">=3.1.0" },
+    { name = "omegaconf", specifier = ">=2.3.0" },
     { name = "openai-codex-app-server-sdk", git = "https://github.com/openai/codex.git?subdirectory=sdk%2Fpython&rev=79ad209ce6cade1089cdbe4dbda8835731d5af15" },
 ]
 

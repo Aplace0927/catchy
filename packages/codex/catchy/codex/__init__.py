@@ -35,6 +35,7 @@ from docker import DockerClient
 from docker.errors import ContainerError, DockerException
 from docker.models.images import Image
 from jinja2 import Template
+from omegaconf import OmegaConf
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -122,6 +123,7 @@ class CodexAgent(Agent):
                 base_url=f"unix://{configuration.container.socket}"
             ),
             user_prompt_template=configuration.prompt.user,
+            docker_socket=configuration.container.socket,
         )
 
     def __init__(
@@ -135,6 +137,7 @@ class CodexAgent(Agent):
         docker_image: Image,
         docker_client: DockerClient,
         user_prompt_template: str,
+        docker_socket: str = "/var/run/docker.sock",
         # model_config: JsonObject = {},
     ):
         self._id = id
@@ -145,6 +148,7 @@ class CodexAgent(Agent):
         self._container_metadata_directory = container_metadata_directory
         self._docker_image = docker_image
         self._docker_client = docker_client
+        self._docker_socket = docker_socket
         self._user_prompt_template = user_prompt_template
 
         image_name = docker_image.tags[0] if docker_image.tags else docker_image.id
@@ -167,6 +171,28 @@ class CodexAgent(Agent):
     def id(self) -> str:
         return self._id
 
+    @property
+    def configuration(self) -> Configuration:
+        return Configuration(
+            id=self._id,
+            model=_Model(
+                name=self._model_name,
+                api_key=self._model_api_key,
+            ),
+            directory=_Directory(
+                challenge=self._container_challenge_directory,
+                workspace=self._container_workspace_directory,
+                metadata=self._container_metadata_directory,
+            ),
+            container=_Container(
+                socket=self._docker_socket,
+                image=self._docker_image,
+            ),
+            prompt=_PromptTemplate(
+                user=self._user_prompt_template,
+            ),
+        )
+
     async def stream(
         self,
         challenge: Challenge,
@@ -184,6 +210,11 @@ class CodexAgent(Agent):
             raise ValueError(
                 f"metadata directory is not a directory: {metadata_directory}"
             )
+
+        OmegaConf.save(
+            config=OmegaConf.create(self.configuration.model_dump(mode="json")),
+            f=metadata_directory / "configuration.yaml",
+        )
 
         with self._docker_container(
             challenge=challenge,

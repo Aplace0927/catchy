@@ -181,6 +181,9 @@ RUN printf '%s\n' \
     > /usr/local/bin/cado-nfs \
     && chmod +x /usr/local/bin/cado-nfs
 
+# Support 32bit binary
+RUN dpkg --add-architecture i386 && apt-get update && apt-get install --yes --no-install-recommends libc6:i386 libstdc++6:i386 libncurses6:i386 && rm -rf /var/lib/apt/lists/*
+
 ENV CODEX_HOME=/metadata/.codex
 COPY config.toml /metadata/.codex/config.toml
 WORKDIR /workspace

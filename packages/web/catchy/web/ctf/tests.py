@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import patch
 
 from django.contrib.auth.models import Group, User
 from django.core.exceptions import PermissionDenied
+from django.db import OperationalError
 from django.test import TestCase
 from django.urls import reverse
 
+from catchy.web.ctf import services
 from catchy.web.ctf.models import (
     AgentConfiguration,
     Challenge,
@@ -144,6 +147,55 @@ class ThreadCreateNameTests(TestCase):
                 "challenge_id": self.challenge.challenge_id,
             },
         )
+
+
+class StreamEventRecordingTests(TestCase):
+    def setUp(self) -> None:
+        self.ctf = Ctf.objects.create(title="Study", slug="study")
+        self.challenge = Challenge.objects.create(
+            ctf=self.ctf,
+            challenge_id="canary",
+            source_archive="ctfs/study/challenges/canary/source.tgz",
+        )
+        self.agent = AgentConfiguration.objects.create(
+            name="Codex",
+            slug="codex",
+            yaml="{}",
+        )
+        self.thread = Thread.objects.create(
+            ctf=self.ctf,
+            challenge=self.challenge,
+            agent=self.agent,
+        )
+
+    def test_record_event_retries_transient_sqlite_lock(self) -> None:
+        calls = 0
+        record_event_once = services._record_event_once
+
+        def flaky_record_event_once(*args: Any, **kwargs: Any) -> StreamEvent:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise OperationalError("database is locked")
+            return record_event_once(*args, **kwargs)
+
+        with (
+            patch(
+                "catchy.web.ctf.services._record_event_once",
+                side_effect=flaky_record_event_once,
+            ),
+            patch("catchy.web.ctf.services.time.sleep"),
+        ):
+            event = services._record_event(
+                self.thread,
+                source="agent_stream",
+                kind="delta",
+                text="hello",
+            )
+
+        self.assertEqual(calls, 2)
+        self.assertEqual(event.sequence, 1)
+        self.assertEqual(event.text, "hello")
 
 
 class PublicThreadAccessTests(TestCase):

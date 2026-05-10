@@ -22,6 +22,7 @@ def _path_env(name: str, default: Path) -> Path:
     value = os.environ.get(name)
     return Path(value) if value else default
 
+
 BASE_DIR = Path(__file__).resolve().parents[2]
 DATA_DIR = _path_env("CATCHY_DATA_DIR", BASE_DIR)
 
@@ -79,11 +80,18 @@ DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.sqlite3",
         "NAME": _path_env("CATCHY_SQLITE_PATH", DATA_DIR / "db.sqlite3"),
+        "OPTIONS": {
+            "timeout": 30,
+            "transaction_mode": "IMMEDIATE",
+            "init_command": "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=30000",
+        },
     }
 }
 
 AUTH_PASSWORD_VALIDATORS = [
-    {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
+    {
+        "NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"
+    },
     {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
     {"NAME": "django.contrib.auth.password_validation.CommonPasswordValidator"},
     {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},

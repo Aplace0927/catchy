@@ -5,13 +5,19 @@ import importlib
 import json
 import tarfile
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
 
 from asgiref.sync import sync_to_async
 from django.conf import settings
-from django.db import close_old_connections, transaction
+from django.db import (
+    IntegrityError,
+    OperationalError,
+    close_old_connections,
+    transaction,
+)
 from django.db.models import Max
 from django.utils import timezone
 
@@ -27,6 +33,9 @@ from .models import (
     Thread,
     ThreadCostSnapshot,
 )
+
+_STREAM_EVENT_WRITE_ATTEMPTS = 6
+_STREAM_EVENT_WRITE_RETRY_DELAY_SECONDS = 0.05
 
 
 def start_thread(thread: Thread) -> Any:
@@ -117,7 +126,9 @@ def run_thread_sync(thread_id: int) -> None:
         status=Thread.Status.COMPLETED,
         updated_at=timezone.now(),
     )
-    _record_event(thread, source="system", kind="thread.completed", text="Thread completed")
+    _record_event(
+        thread, source="system", kind="thread.completed", text="Thread completed"
+    )
 
 
 def load_agent(
@@ -134,7 +145,9 @@ def load_agent(
         None,
     )
     if not hasattr(configuration_class, "model_validate"):
-        raise TypeError(f"agent module must expose Configuration: {agent_class.__module__}")
+        raise TypeError(
+            f"agent module must expose Configuration: {agent_class.__module__}"
+        )
 
     from_configuration = getattr(agent_class, "from_configuration", None)
     if not callable(from_configuration):
@@ -160,7 +173,9 @@ def ingest_codex_sessions(thread: Thread, *, model_name: str | None = None) -> N
         _ingest_session_file(thread, path)
 
     if model_name and session_paths:
-        estimate = estimate_codex_session_jsonl_cost(session_paths[-1], model=model_name)
+        estimate = estimate_codex_session_jsonl_cost(
+            session_paths[-1], model=model_name
+        )
         thread.latest_cost_usd = estimate.usd
         thread.latest_cost = estimate.as_dict()
         thread.save(update_fields=["latest_cost_usd", "latest_cost", "updated_at"])
@@ -253,7 +268,9 @@ def _ingest_session_file(thread: Thread, path: Path) -> None:
             if not line:
                 continue
             dedupe_key = f"jsonl:{relative_path}:{line_number}"
-            if StreamEvent.objects.filter(thread=thread, dedupe_key=dedupe_key).exists():
+            if StreamEvent.objects.filter(
+                thread=thread, dedupe_key=dedupe_key
+            ).exists():
                 continue
             try:
                 raw = json.loads(line)
@@ -318,6 +335,50 @@ def _record_event(
     raw: dict[str, Any] | None = None,
     dedupe_key: str | None = None,
 ) -> StreamEvent:
+    delay = _STREAM_EVENT_WRITE_RETRY_DELAY_SECONDS
+    for attempt in range(_STREAM_EVENT_WRITE_ATTEMPTS):
+        try:
+            return _record_event_once(
+                thread,
+                source=source,
+                kind=kind,
+                text=text,
+                raw=raw,
+                dedupe_key=dedupe_key,
+            )
+        except OperationalError as exc:
+            if (
+                not _is_database_locked(exc)
+                or attempt == _STREAM_EVENT_WRITE_ATTEMPTS - 1
+            ):
+                raise
+            close_old_connections()
+            time.sleep(delay)
+            delay *= 2
+        except IntegrityError:
+            if dedupe_key is not None:
+                event = StreamEvent.objects.filter(
+                    thread=thread,
+                    dedupe_key=dedupe_key,
+                ).first()
+                if event is not None:
+                    return event
+            if attempt == _STREAM_EVENT_WRITE_ATTEMPTS - 1:
+                raise
+            time.sleep(delay)
+            delay *= 2
+    raise RuntimeError("stream event write retry loop exited unexpectedly")
+
+
+def _record_event_once(
+    thread: Thread,
+    *,
+    source: str,
+    kind: str,
+    text: str,
+    raw: dict[str, Any] | None = None,
+    dedupe_key: str | None = None,
+) -> StreamEvent:
     with transaction.atomic():
         sequence = (
             StreamEvent.objects.filter(thread=thread).aggregate(Max("sequence"))[
@@ -341,6 +402,11 @@ def _record_event(
         return event
 
 
+def _is_database_locked(exc: OperationalError) -> bool:
+    message = str(exc).lower()
+    return "database is locked" in message or "database table is locked" in message
+
+
 def _agent_class_path(data: dict[str, Any]) -> str:
     class_path = data.get("class", "catchy.codex.CodexAgent")
     if class_path == "CodexAgent":
@@ -353,7 +419,9 @@ def _agent_class_path(data: dict[str, Any]) -> str:
 def _import_agent_class(class_path: str) -> type[Any]:
     module_name, separator, attribute_name = class_path.rpartition(".")
     if not separator or not module_name or not attribute_name:
-        raise ValueError(f"agent class must be a fully qualified import path: {class_path!r}")
+        raise ValueError(
+            f"agent class must be a fully qualified import path: {class_path!r}"
+        )
     module = importlib.import_module(module_name)
     agent_class = getattr(module, attribute_name, None)
     if not isinstance(agent_class, type):

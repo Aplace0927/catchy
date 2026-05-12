@@ -271,25 +271,37 @@ def build_agent_configuration(
         raise PermissionDenied("model configuration is not accessible")
     if user is not None and not credential.can_view(user):
         raise PermissionDenied("credential is not accessible")
-    if credential.kind != Credential.Kind.OPENAI:
-        raise ValueError(f"unsupported credential kind: {credential.kind}")
+    provider = _provider_for_credential(credential)
 
     existing_model = data.get("model", {})
     model_data = dict(existing_model) if isinstance(existing_model, dict) else {}
     model_data.update(
         {
-            "provider": "openai",
+            "provider": provider,
             "name": model_configuration.name,
             "api_key": credential.api_key,
-            "base_url": credential.base_url,
         }
     )
+    if credential.base_url:
+        model_data["base_url"] = credential.base_url
+    else:
+        model_data.pop("base_url", None)
     if credential.organization_id:
         model_data["organization_id"] = credential.organization_id
     else:
         model_data.pop("organization_id", None)
     data["model"] = model_data
     return data
+
+
+def _provider_for_credential(credential: Credential) -> str:
+    match credential.kind:
+        case Credential.Kind.OPENAI:
+            return "openai"
+        case Credential.Kind.ANTHROPIC:
+            return "anthropic"
+        case _:
+            raise ValueError(f"unsupported credential kind: {credential.kind}")
 
 
 def ingest_codex_sessions(thread: Thread, *, model_name: str | None = None) -> None:
@@ -317,6 +329,34 @@ def ingest_codex_sessions(thread: Thread, *, model_name: str | None = None) -> N
             usd=estimate.usd,
             usage=estimate.as_dict(),
         )
+
+
+def ingest_claude_sessions(thread: Thread, *, model_name: str | None = None) -> None:
+    metadata = thread.metadata_directory
+    if metadata is None:
+        return
+
+    projects_root = metadata / ".claude" / "projects"
+    if not projects_root.exists():
+        return
+
+    project_paths = sorted(path for path in projects_root.iterdir() if path.is_dir())
+    if not project_paths:
+        return
+
+    session_paths = sorted(project_paths[0].glob("*.jsonl"))
+    if not session_paths:
+        return
+
+    latest_usage = _ingest_claude_usage_file(thread, session_paths[0])
+    if latest_usage is None:
+        return
+
+    thread.latest_cost = _claude_usage_snapshot(
+        latest_usage,
+        model_name=model_name or _thread_model_name(thread),
+    )
+    thread.save(update_fields=["latest_cost", "updated_at"])
 
 
 async def _run_agent_stream(
@@ -387,7 +427,7 @@ def _record_stream_event(thread_id: int, event: Event, model_name: str) -> None:
             _record_event(
                 thread,
                 source="agent_stream",
-                kind="chunk",
+                kind=_stream_chunk_kind(chunk.tag),
                 text=chunk.text,
                 raw={"tag": chunk.tag},
             )
@@ -399,6 +439,7 @@ def _record_stream_event(thread_id: int, event: Event, model_name: str) -> None:
                 text="",
             )
             ingest_codex_sessions(thread, model_name=model_name)
+            ingest_claude_sessions(thread, model_name=model_name)
         case TurnCompleted():
             _record_event(
                 thread,
@@ -407,8 +448,15 @@ def _record_stream_event(thread_id: int, event: Event, model_name: str) -> None:
                 text="",
             )
             ingest_codex_sessions(thread, model_name=model_name)
+            ingest_claude_sessions(thread, model_name=model_name)
         case Nop():
             return
+
+
+def _stream_chunk_kind(tag: str) -> str:
+    if tag in {"thinking", "tool_input", "tool_use"}:
+        return tag
+    return "chunk"
 
 
 def _pop_next_thread_command(thread_id: int) -> Interrupt:
@@ -472,6 +520,93 @@ def _ingest_session_file(thread: Thread, path: Path) -> None:
                 raw=raw if isinstance(raw, dict) else {"value": raw},
                 dedupe_key=dedupe_key,
             )
+
+
+def _ingest_claude_usage_file(thread: Thread, path: Path) -> dict[str, Any] | None:
+    try:
+        relative_path = str(path.relative_to(Path(thread.metadata_path)))
+    except ValueError:
+        relative_path = str(path)
+
+    latest_usage: dict[str, Any] | None = None
+    with path.open() as file:
+        for line_number, line in enumerate(file, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                raw = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(raw, dict):
+                continue
+            usage = _claude_message_usage(raw)
+            if usage is None:
+                continue
+            latest_usage = usage
+            dedupe_key = f"claude-jsonl:usage:{relative_path}:{line_number}"
+            if StreamEvent.objects.filter(
+                thread=thread, dedupe_key=dedupe_key
+            ).exists():
+                continue
+            _record_event(
+                thread,
+                source="claude_jsonl",
+                kind="token_count",
+                text=json.dumps(usage, ensure_ascii=False),
+                raw=raw,
+                dedupe_key=dedupe_key,
+            )
+    return latest_usage
+
+
+def _claude_message_usage(raw: dict[str, Any]) -> dict[str, Any] | None:
+    message = raw.get("message")
+    if not isinstance(message, dict):
+        return None
+    usage = message.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    return {str(key): value for key, value in usage.items()}
+
+
+def _claude_usage_snapshot(
+    usage: dict[str, Any],
+    *,
+    model_name: str,
+) -> dict[str, Any]:
+    input_tokens = _int_value(usage.get("input_tokens"))
+    cache_creation_input_tokens = _int_value(usage.get("cache_creation_input_tokens"))
+    cache_read_input_tokens = _int_value(usage.get("cache_read_input_tokens"))
+    output_tokens = _int_value(usage.get("output_tokens"))
+    total_tokens = (
+        input_tokens
+        + cache_creation_input_tokens
+        + cache_read_input_tokens
+        + output_tokens
+    )
+    return {
+        "provider": "anthropic",
+        "model": model_name,
+        "input_tokens": input_tokens,
+        "cache_creation_input_tokens": cache_creation_input_tokens,
+        "cache_read_input_tokens": cache_read_input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+        "usd": "0",
+    }
+
+
+def _int_value(value: object) -> int:
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str) and value.isdecimal():
+        return int(value)
+    return 0
 
 
 def _summarize_codex_event(raw: Any) -> tuple[str, str]:

@@ -46,7 +46,7 @@ The web UI stores reusable configuration in the database:
 
 - **Credentials** hold provider API keys. Agent YAML can reference them with OmegaConf interpolation such as `${credential:openai}`.
 - **Models** name the model that should be injected into a run.
-- **Agents** store YAML like `configurations/codex.yaml`; the `class` field should be a fully qualified import path such as `catchy.codex.CodexAgent`.
+- **Agents** store YAML like `configurations/codex.yaml` or `configurations/claude-code.yaml`; the `class` field should be a fully qualified import path such as `catchy.codex.CodexAgent` or `catchy.claude_code.ClaudeCodeAgent`.
 - **CTFs** group challenges and access rules.
 - **Challenges** include a markdown description, optional webhook settings, optional runner config, and a source archive upload or download URL.
 
@@ -87,6 +87,7 @@ The old shorthand `class: CodexAgent` still resolves to `catchy.codex.CodexAgent
 catchy/
 ├── packages/
 │   ├── core/         # Challenge, Agent, Webhook protocols & models
+│   ├── claude-code/  # ClaudeCodeAgent — Claude Code + Docker runtime
 │   ├── codex/        # CodexAgent — Codex App Server + Docker runtime
 │   └── web/          # Django web UI and thread orchestration
 ├── configurations/   # Agent YAML configurations

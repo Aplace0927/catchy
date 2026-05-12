@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import tarfile
 import tempfile
 import zipfile
@@ -72,6 +73,20 @@ class CredentialAgentPermissionTests(TestCase):
                 "kind": Credential.Kind.OPENAI,
                 "api_key": "test-key",
                 "base_url": "https://api.openai.com/v1",
+                "organization_id": "",
+            }
+        )
+
+        self.assertTrue(form.is_valid(), form.errors)
+
+    def test_anthropic_credential_accepts_blank_base_url(self) -> None:
+        form = CredentialForm(
+            {
+                "name": "Anthropic Production Key",
+                "slug": "anthropic-prod",
+                "kind": Credential.Kind.ANTHROPIC,
+                "api_key": "test-key",
+                "base_url": "",
                 "organization_id": "",
             }
         )
@@ -150,6 +165,42 @@ class CredentialAgentPermissionTests(TestCase):
         self.assertEqual(data["model"]["api_key"], "top-secret")
         self.assertEqual(data["model"]["base_url"], "https://example.test/v1")
         self.assertEqual(data["model"]["organization_id"], "org_123")
+
+    def test_build_agent_configuration_overlays_anthropic_credential(self) -> None:
+        agent = AgentConfiguration.objects.create(
+            name="Claude Code",
+            slug="claude-code",
+            yaml=(
+                "id: claude-code\n"
+                "class: catchy.claude_code.ClaudeCodeAgent\n"
+                "model:\n"
+                "  provider: anthropic\n"
+                "  name: old\n"
+            ),
+        )
+        model = ModelConfiguration.objects.create(
+            name="claude-sonnet-4-5", slug="claude-sonnet-45"
+        )
+        credential = Credential.objects.create(
+            name="Anthropic Token",
+            slug="anthropic-token",
+            kind=Credential.Kind.ANTHROPIC,
+            api_key="anthropic-secret",
+            base_url="",
+        )
+        credential.allowed_groups.add(self.allowed_group)
+
+        data = services.build_agent_configuration(
+            agent,
+            model_configuration=model,
+            credential=credential,
+            user=self.allowed_user,
+        )
+
+        self.assertEqual(data["model"]["provider"], "anthropic")
+        self.assertEqual(data["model"]["name"], "claude-sonnet-4-5")
+        self.assertEqual(data["model"]["api_key"], "anthropic-secret")
+        self.assertNotIn("base_url", data["model"])
 
     def test_thread_create_rejects_credential_user_cannot_view(self) -> None:
         ctf = Ctf.objects.create(title="Study", slug="study")
@@ -418,7 +469,10 @@ class StreamEventRecordingTests(TestCase):
         self.assertEqual(event.raw, {"tag": "action"})
 
     def test_record_stream_event_persists_item_termination(self) -> None:
-        with patch("catchy.web.ctf.services.ingest_codex_sessions") as ingest:
+        with (
+            patch("catchy.web.ctf.services.ingest_codex_sessions") as codex_ingest,
+            patch("catchy.web.ctf.services.ingest_claude_sessions") as claude_ingest,
+        ):
             services._record_stream_event(
                 self.thread.pk,
                 ItemCompleted(),
@@ -429,7 +483,105 @@ class StreamEventRecordingTests(TestCase):
         self.assertEqual(event.source, "agent_stream")
         self.assertEqual(event.kind, "item.terminated")
         self.assertEqual(event.text, "")
-        ingest.assert_called_once()
+        codex_ingest.assert_called_once()
+        claude_ingest.assert_called_once()
+
+    def test_ingest_claude_sessions_records_token_usage_from_jsonl(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            metadata = Path(directory) / "metadata"
+            session_path = (
+                metadata
+                / ".claude"
+                / "projects"
+                / "-home-beta-paper-code-retrieval"
+                / "2fe9df96-2071-49e3-bdcb-4ff9f63a17f3.jsonl"
+            )
+            session_path.parent.mkdir(parents=True)
+            session_path.write_text(
+                "\n".join(
+                    json.dumps(value)
+                    for value in [
+                        {
+                            "type": "user",
+                            "message": {
+                                "role": "user",
+                                "content": [{"type": "text", "text": "hello"}],
+                            },
+                        },
+                        {
+                            "type": "assistant",
+                            "message": {
+                                "role": "assistant",
+                                "content": [
+                                    {"type": "text", "text": "streamed already"},
+                                ],
+                                "usage": {
+                                    "input_tokens": 1,
+                                    "cache_creation_input_tokens": 234,
+                                    "cache_read_input_tokens": 19232,
+                                    "output_tokens": 226,
+                                },
+                            },
+                        },
+                    ]
+                )
+                + "\n"
+            )
+            self.thread.metadata_path = str(metadata)
+            self.thread.save(update_fields=["metadata_path", "updated_at"])
+
+            services.ingest_claude_sessions(
+                self.thread,
+                model_name="claude-sonnet-4-5",
+            )
+            services.ingest_claude_sessions(
+                self.thread,
+                model_name="claude-sonnet-4-5",
+            )
+
+        event = StreamEvent.objects.get(thread=self.thread)
+        self.assertEqual(event.source, "claude_jsonl")
+        self.assertEqual(event.kind, "token_count")
+        self.assertEqual(
+            json.loads(event.text),
+            {
+                "input_tokens": 1,
+                "cache_creation_input_tokens": 234,
+                "cache_read_input_tokens": 19232,
+                "output_tokens": 226,
+            },
+        )
+        self.assertEqual(
+            event.dedupe_key,
+            "claude-jsonl:usage:.claude/projects/-home-beta-paper-code-retrieval/2fe9df96-2071-49e3-bdcb-4ff9f63a17f3.jsonl:2",
+        )
+        self.thread.refresh_from_db()
+        self.assertEqual(
+            self.thread.latest_cost,
+            {
+                "provider": "anthropic",
+                "model": "claude-sonnet-4-5",
+                "input_tokens": 1,
+                "cache_creation_input_tokens": 234,
+                "cache_read_input_tokens": 19232,
+                "output_tokens": 226,
+                "total_tokens": 19693,
+                "usd": "0",
+            },
+        )
+
+    def test_record_stream_event_uses_structured_chunk_tags_as_kind(self) -> None:
+        services._record_stream_event(
+            self.thread.pk,
+            Chunk(tag="tool_use", text='{"name":"Read"}'),
+            "claude-sonnet-4-5",
+        )
+
+        event = StreamEvent.objects.get(thread=self.thread)
+        self.assertEqual(event.source, "agent_stream")
+        self.assertEqual(event.kind, "tool_use")
+        self.assertEqual(event.text, '{"name":"Read"}')
+        self.assertEqual(event.raw, {"tag": "tool_use"})
 
     def test_record_stream_event_ignores_nop(self) -> None:
         services._record_stream_event(self.thread.pk, Nop(), "gpt-5.5")

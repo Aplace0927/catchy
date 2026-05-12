@@ -33,6 +33,7 @@ WORKDIR /app
 
 COPY pyproject.toml uv.lock README.md ./
 COPY packages/core/pyproject.toml packages/core/pyproject.toml
+COPY packages/claude-code/pyproject.toml packages/claude-code/pyproject.toml
 COPY packages/codex/pyproject.toml packages/codex/pyproject.toml
 COPY packages/web/pyproject.toml packages/web/pyproject.toml
 
@@ -40,6 +41,7 @@ RUN uv python install 3.14 \
     && uv sync --frozen --no-dev --package catchy-web --no-install-workspace
 
 COPY packages/core packages/core
+COPY packages/claude-code packages/claude-code
 COPY packages/codex packages/codex
 COPY packages/web packages/web
 COPY containers/web/docker-entrypoint.sh /usr/local/bin/catchy-web-entrypoint

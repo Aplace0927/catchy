@@ -207,6 +207,15 @@
           if (kind === "message") return "success";
           return "info";
         }
+        if (source === "claude_jsonl") {
+          if (kind === "token_count") return "metric";
+          return "info";
+        }
+        if (source === "agent_stream") {
+          if (kind === "tool_use") return "tool";
+          if (kind === "tool_input") return "tool";
+          if (kind === "thinking") return "info";
+        }
         return "";
       }
 
@@ -245,7 +254,8 @@
       }
 
       function isAgentChunk(ev) {
-        return ev.source === "agent_stream" && (ev.kind === "chunk" || ev.kind === "delta");
+        return ev.source === "agent_stream"
+          && (ev.kind === "chunk" || ev.kind === "delta" || ev.kind === "thinking");
       }
 
       function isItemTermination(ev) {
@@ -255,7 +265,7 @@
       function tokenStats(ev) {
         const raw = ev.raw;
         if (!raw || typeof raw !== "object") return { stats: null, costUsd: null };
-        const payload = raw.payload || raw;
+        const payload = raw.payload || raw.message || raw;
         const info = (payload && (payload.info || payload.usage)) || null;
         if (!info || typeof info !== "object") return { stats: null, costUsd: null };
         const usage = info.total_token_usage || info.last_token_usage || info;
@@ -265,6 +275,8 @@
           ["input_tokens", "input"],
           ["output_tokens", "output"],
           ["cached_input_tokens", "cached"],
+          ["cache_read_input_tokens", "cached"],
+          ["cache_creation_input_tokens", "cache write"],
           ["cached_tokens", "cached"],
           ["total_tokens", "total"],
         ];

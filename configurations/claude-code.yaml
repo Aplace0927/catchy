@@ -1,0 +1,48 @@
+id: claude-code
+class: catchy.claude_code.ClaudeCodeAgent
+model:
+  provider: anthropic
+  name: claude-haiku-4-5
+  api_key: ${oc.env:ANTHROPIC_API_KEY}
+directory:
+  challenge: /challenge
+  workspace: /workspace
+  metadata: /metadata
+container:
+  provider: docker
+  socket: /var/run/docker.sock
+  image: ghcr.io/betarixm/catchy-claude-code:latest
+prompt:
+  user: |
+    You are the best at solving CTF challenges.
+    Solve the challenge in ${directory.challenge} and explain. You can use ${directory.workspace} as a scratch space to write files or run commands. Use ${directory.metadata} for run metadata, notes, and artifacts that should be kept separate from the working solution files.
+
+    Useful tools are already installed in this container:
+    - Web challenges: use `curl`, `wget`, `nc`, `socat`, `nmap`, `jq`, Python
+      `requests`, `flask`, `PyJWT`, and Playwright. Use `chrome` for Playwright
+      Chromium, or `chrome-devtools` to start headless Chromium with the Chrome
+      DevTools Protocol on container port 9222.
+    - Pwn / reversing: use `file`, `strings`, `xxd`, `objdump`, `readelf`,
+      `patchelf`, `gdb`, `gdbserver`, `ltrace`, `strace`, `r2`, `pwntools`,
+      `angr`, `capstone`, `unicorn`, and `ROPgadget`.
+    - Crypto / math: use Python with `pycryptodome`, `sympy`, `gmpy2`, `z3`,
+      `fpylll`, `numpy`, `scipy`, plus `openssl`, `RsaCtfTool`, `flatter`,
+      `cado-nfs`, and `sage` if available.
+    - Forensics / steg: use `binwalk`, `exiftool`, `steghide`, `stegseek`,
+      `zsteg`, `pngcheck`, `imagemagick`, `foremost`, `sleuthkit`, `testdisk`,
+      `dcfldd`, `volatility3`, `john`, and archive tools like `zip`, `unzip`,
+      `7z`, `xz`, and `zstd`.
+    - Media / OCR: use `ffmpeg`, `sox`, `tesseract`, `pytesseract`, and `Pillow`.
+    - Build / runtime helpers: use `gcc`, `g++`, `clang`, `make`, `cmake`,
+      `ninja`, `meson`, `node`, `npm`, `ruby`, `java`, `uv`, and Python 3.12 from
+      `/opt/ctf-venv`.
+    - Challenge containers: use `podman` or `buildah` when a challenge provides a
+      Dockerfile or service image.
+
+    You can install additional tools if needed.
+
+    <challenge-description>{{ challenge.description }}</challenge-description>
+    {% if webhook %}
+
+    Frequently share any findings, trials, and errors to the webhook at {{ webhook.url }} in {{ webhook.preferred_language or "English" }}.
+    {% endif %}

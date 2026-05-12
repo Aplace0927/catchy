@@ -7,16 +7,27 @@ requires-python = ">=3.14"
 dependencies = []
 
 [tool.uv.workspace]
-members = ["packages/core", "packages/codex", "packages/web"]
+members = [
+    "packages/core",
+    "packages/claude-code",
+    "packages/codex",
+    "packages/web",
+]
 
 [tool.uv.sources]
 catchy-core = { workspace = true }
+catchy-claude-code = { workspace = true }
 catchy-codex = { workspace = true }
 catchy-web = { workspace = true }
 
 [tool.pyright]
-include = ["packages/core", "packages/codex", "tests"]
-extraPaths = ["packages/core", "packages/codex", "packages/web"]
+include = ["packages/core", "packages/claude-code", "packages/codex", "tests"]
+extraPaths = [
+    "packages/core",
+    "packages/claude-code",
+    "packages/codex",
+    "packages/web",
+]
 venvPath = "."
 venv = ".venv"
 pythonVersion = "3.14"
@@ -32,6 +43,7 @@ markers = [
 [dependency-groups]
 dev = [
     "catchy-codex",
+    "catchy-claude-code",
     "catchy-core",
     "catchy-web",
     "django-types>=0.24.0",

@@ -4,9 +4,7 @@ import asyncio
 import importlib
 import json
 import shutil
-import tarfile
 import threading
-import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
@@ -42,6 +40,7 @@ from .models import (
     Thread,
     ThreadCostSnapshot,
 )
+from .source_archives import safe_extract_archive
 
 _CODEX_RUNTIME_METADATA_DIRS = frozenset({".tmp", "tmp"})
 
@@ -149,7 +148,7 @@ def run_thread_sync(thread_id: int) -> None:
     source_directory.mkdir(parents=True, exist_ok=True)
     workspace.mkdir(parents=True, exist_ok=True)
     metadata.mkdir(parents=True, exist_ok=True)
-    _safe_extract_tar_gz(Path(thread.challenge.source_archive.path), source_directory)
+    safe_extract_archive(Path(thread.challenge.source_archive.path), source_directory)
 
     thread.thread_root = str(thread_root)
     thread.workspace_path = str(workspace)
@@ -587,17 +586,3 @@ def _thread_root(thread: Thread) -> Path:
         return Path(thread.thread_root)
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     return Path(settings.MEDIA_ROOT) / "threads" / f"thread-{thread.pk}-{timestamp}"
-
-
-def _safe_extract_tar_gz(archive_path: Path, destination: Path) -> None:
-    with tarfile.open(archive_path, mode="r:gz") as archive:
-        destination_root = destination.resolve()
-        for member in archive.getmembers():
-            target = (destination / member.name).resolve()
-            try:
-                target.relative_to(destination_root)
-            except ValueError as exc:
-                raise ValueError(
-                    f"archive member escapes destination: {member.name}"
-                ) from exc
-        archive.extractall(destination)

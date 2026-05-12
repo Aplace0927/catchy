@@ -1,13 +1,21 @@
 from __future__ import annotations
 
-import tarfile
 from typing import Any
+from urllib.parse import urlparse
 
 from django import forms
+from django.core.files import File
+from django.core.files.uploadedfile import UploadedFile
 from django.utils.text import slugify
 from omegaconf import OmegaConf
 
 from .models import AgentConfiguration, Challenge, Credential, Ctf, ModelConfiguration
+from .source_archives import (
+    SOURCE_ARCHIVE_FORMAT_HINT,
+    DownloadedSourceArchive,
+    download_source_archive,
+    validate_source_archive_upload,
+)
 
 
 class CredentialForm(forms.ModelForm):
@@ -81,6 +89,15 @@ class CtfForm(forms.ModelForm):
 
 
 class ChallengeForm(forms.ModelForm):
+    source_url = forms.URLField(
+        required=False,
+        label="Download URL",
+        help_text=(
+            "Use instead of uploading a file. Catchy downloads it now and stores a "
+            f"reusable archive. Supported formats: {SOURCE_ARCHIVE_FORMAT_HINT}."
+        ),
+        widget=forms.URLInput(attrs={"placeholder": "https://example.com/source.zip"}),
+    )
     webhook_url = forms.URLField(
         required=False,
         label="Webhook URL",
@@ -106,7 +123,7 @@ class ChallengeForm(forms.ModelForm):
     )
 
     fieldsets = [
-        ("Basics", ["challenge_id", "description", "source_archive"]),
+        ("Basics", ["challenge_id", "description", "source_archive", "source_url"]),
         ("Webhook", ["webhook_url", "webhook_preferred_language", "clear_webhook"]),
         ("Advanced", ["config_yaml"]),
     ]
@@ -116,10 +133,24 @@ class ChallengeForm(forms.ModelForm):
         fields = ["challenge_id", "description", "source_archive"]
         help_texts = {
             "description": "Markdown is supported.",
+            "source_archive": (
+                "Upload a challenge source archive. Supported formats: "
+                f"{SOURCE_ARCHIVE_FORMAT_HINT}."
+            ),
         }
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        *args: Any,
+        ctf: Ctf | None = None,
+        **kwargs: Any,
+    ) -> None:
+        self.ctf = ctf
+        self._downloaded_source_archive: DownloadedSourceArchive | None = None
         super().__init__(*args, **kwargs)
+        if self.ctf is not None and not self.instance.pk:
+            self.instance.ctf = self.ctf
+        self.fields["source_archive"].required = False
         if self.instance.pk:
             webhook_data = _safe_yaml_mapping(self.instance.webhook)
             existing_webhook_url = str(webhook_data.get("url") or "")
@@ -137,9 +168,17 @@ class ChallengeForm(forms.ModelForm):
                 self.fields["clear_webhook"].widget = forms.HiddenInput()
             self.fields["config_yaml"].initial = self.instance.config
             self.fields["source_archive"].required = False
-            self.fields[
-                "source_archive"
-            ].help_text = "Leave blank to keep the existing archive."
+            if self.instance.source_archive:
+                self.fields["source_archive"].help_text = (
+                    "Leave blank to keep the existing archive, upload a new archive "
+                    "to replace it, or enter a download URL. Supported formats: "
+                    f"{SOURCE_ARCHIVE_FORMAT_HINT}."
+                )
+            else:
+                self.fields["source_archive"].help_text = (
+                    "Upload an archive, or leave blank when using a download URL. "
+                    f"Supported formats: {SOURCE_ARCHIVE_FORMAT_HINT}."
+                )
         else:
             self.fields["clear_webhook"].widget = forms.HiddenInput()
 
@@ -148,24 +187,49 @@ class ChallengeForm(forms.ModelForm):
         if not archive:
             if self.instance.pk and self.instance.source_archive:
                 return self.instance.source_archive
-            raise forms.ValidationError("This field is required.")
-        if not hasattr(archive, "name"):
             return archive
-        name = archive.name.lower()
-        if not (name.endswith(".tar.gz") or name.endswith(".tgz")):
-            raise forms.ValidationError("source must be a .tar.gz or .tgz archive")
+        if not isinstance(archive, UploadedFile):
+            return archive
         try:
             archive.file.seek(0)
-            with tarfile.open(fileobj=archive.file, mode="r:gz"):
-                pass
-        except tarfile.TarError as exc:
-            raise forms.ValidationError("source archive is not a valid tar.gz") from exc
+            validate_source_archive_upload(archive.file, archive.name)
+        except ValueError as exc:
+            raise forms.ValidationError(str(exc)) from exc
         finally:
             archive.file.seek(0)
         return archive
 
+    def clean_source_url(self) -> str:
+        url = str(self.cleaned_data.get("source_url") or "").strip()
+        if not url:
+            return ""
+        scheme = urlparse(url).scheme.lower()
+        if scheme not in {"http", "https"}:
+            raise forms.ValidationError("Download URL must use http or https.")
+        if self.files.get("source_archive"):
+            return url
+        try:
+            self._downloaded_source_archive = download_source_archive(url)
+        except ValueError as exc:
+            raise forms.ValidationError(str(exc)) from exc
+        return url
+
     def clean(self) -> dict[str, Any]:
         cleaned = super().clean()
+        source_url = str(cleaned.get("source_url") or "").strip()
+        has_new_upload = bool(self.files.get("source_archive"))
+        has_existing_archive = bool(self.instance.pk and self.instance.source_archive)
+        if has_new_upload and source_url:
+            self.add_error(
+                "source_url",
+                "Upload a file or enter a download URL, not both.",
+            )
+        elif not has_new_upload and not source_url and not has_existing_archive:
+            self.add_error(
+                "source_archive",
+                "Upload a source archive or enter a download URL.",
+            )
+
         url = (cleaned.get("webhook_url") or "").strip()
         lang = (cleaned.get("webhook_preferred_language") or "").strip()
         clear = bool(cleaned.get("clear_webhook"))
@@ -189,6 +253,19 @@ class ChallengeForm(forms.ModelForm):
 
     def save(self, commit: bool = True) -> Challenge:
         instance = super().save(commit=False)
+        has_new_upload = bool(self.files.get("source_archive"))
+        source_url = self.cleaned_data["source_url"]
+        if not has_new_upload and source_url:
+            if self._downloaded_source_archive is None:
+                raise ValueError("source URL was not downloaded")
+            if self.ctf is not None and not instance.ctf_id:
+                instance.ctf = self.ctf
+            self._downloaded_source_archive.file.seek(0)
+            instance.source_archive.save(
+                self._downloaded_source_archive.name,
+                File(self._downloaded_source_archive.file),
+                save=False,
+            )
         instance.webhook = self._serialize_webhook()
         instance.config = self.cleaned_data["config_yaml"]
         if commit:

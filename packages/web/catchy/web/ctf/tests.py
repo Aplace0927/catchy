@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import io
+import tarfile
 import tempfile
+import zipfile
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
@@ -20,12 +23,12 @@ from catchy.core.agents.protocols import Agent
 from catchy.core.challenge.models import Challenge as CoreChallenge
 from django.contrib.auth.models import Group, User
 from django.core.exceptions import PermissionDenied
-from django.db import OperationalError
-from django.test import TestCase
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import TestCase, override_settings
 from django.urls import reverse
 
 from catchy.web.ctf import services
-from catchy.web.ctf.forms import CredentialForm, ModelConfigurationForm
+from catchy.web.ctf.forms import ChallengeForm, CredentialForm, ModelConfigurationForm
 from catchy.web.ctf.models import (
     AgentConfiguration,
     Challenge,
@@ -35,6 +38,10 @@ from catchy.web.ctf.models import (
     SteeringMessage,
     StreamEvent,
     Thread,
+)
+from catchy.web.ctf.source_archives import (
+    DownloadedSourceArchive,
+    safe_extract_archive,
 )
 
 
@@ -173,6 +180,113 @@ class CredentialAgentPermissionTests(TestCase):
 
         self.assertRedirects(response, challenge.get_absolute_url())
         self.assertFalse(Thread.objects.exists())
+
+
+class ChallengeSourceFormTests(TestCase):
+    def setUp(self) -> None:
+        self.ctf = Ctf.objects.create(title="Study", slug="study")
+
+    def test_challenge_form_accepts_zip_upload(self) -> None:
+        form = ChallengeForm(
+            data={
+                "challenge_id": "zip-source",
+                "description": "",
+                "source_url": "",
+                "webhook_url": "",
+                "webhook_preferred_language": "",
+                "config_yaml": "",
+            },
+            files={
+                "source_archive": SimpleUploadedFile(
+                    "source.zip",
+                    _zip_archive_bytes(),
+                ),
+            },
+            ctf=self.ctf,
+        )
+
+        self.assertTrue(form.is_valid(), form.errors)
+
+    def test_challenge_form_accepts_tar_xz_upload(self) -> None:
+        form = ChallengeForm(
+            data={
+                "challenge_id": "tar-xz-source",
+                "description": "",
+                "source_url": "",
+                "webhook_url": "",
+                "webhook_preferred_language": "",
+                "config_yaml": "",
+            },
+            files={
+                "source_archive": SimpleUploadedFile(
+                    "source.tar.xz",
+                    _tar_xz_archive_bytes(),
+                ),
+            },
+            ctf=self.ctf,
+        )
+
+        self.assertTrue(form.is_valid(), form.errors)
+
+    def test_challenge_form_downloads_url_source_once_and_saves_archive(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, override_settings(MEDIA_ROOT=tmp):
+            downloaded = DownloadedSourceArchive(
+                name="source.zip",
+                file=io.BytesIO(_zip_archive_bytes()),
+            )
+            with patch(
+                "catchy.web.ctf.forms.download_source_archive",
+                return_value=downloaded,
+            ) as download:
+                form = ChallengeForm(
+                    data={
+                        "challenge_id": "remote-source",
+                        "description": "",
+                        "source_url": "https://example.test/source.zip",
+                        "webhook_url": "",
+                        "webhook_preferred_language": "",
+                        "config_yaml": "",
+                    },
+                    ctf=self.ctf,
+                )
+
+                self.assertTrue(form.is_valid(), form.errors)
+                challenge = form.save()
+
+            download.assert_called_once_with("https://example.test/source.zip")
+            self.assertEqual(
+                challenge.source_archive.name,
+                "ctfs/study/challenges/remote-source/source.zip",
+            )
+            self.assertTrue((Path(tmp) / challenge.source_archive.name).exists())
+
+    def test_challenge_form_rejects_missing_source(self) -> None:
+        form = ChallengeForm(
+            data={
+                "challenge_id": "missing-source",
+                "description": "",
+                "source_url": "",
+                "webhook_url": "",
+                "webhook_preferred_language": "",
+                "config_yaml": "",
+            },
+            ctf=self.ctf,
+        )
+
+        self.assertFalse(form.is_valid())
+        self.assertIn("source_archive", form.errors)
+
+
+class ChallengeSourceArchiveTests(TestCase):
+    def test_safe_extract_archive_supports_zip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            archive_path = Path(tmp) / "source.zip"
+            destination = Path(tmp) / "source"
+            archive_path.write_bytes(_zip_archive_bytes())
+
+            safe_extract_archive(archive_path, destination)
+
+            self.assertEqual((destination / "README.md").read_text(), "hello\n")
 
 
 class ModelConfigurationViewTests(TestCase):
@@ -876,3 +990,20 @@ class PublicThreadAccessTests(TestCase):
             status=Thread.Status.COMPLETED,
             is_public=is_public,
         )
+
+
+def _zip_archive_bytes() -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, mode="w") as archive:
+        archive.writestr("README.md", "hello\n")
+    return buffer.getvalue()
+
+
+def _tar_xz_archive_bytes() -> bytes:
+    buffer = io.BytesIO()
+    content = b"hello\n"
+    info = tarfile.TarInfo("README.md")
+    info.size = len(content)
+    with tarfile.open(fileobj=buffer, mode="w:xz") as archive:
+        archive.addfile(info, io.BytesIO(content))
+    return buffer.getvalue()

@@ -20,6 +20,7 @@ from docker import DockerClient
 from docker.errors import DockerException
 
 from catchy.codex import CodexAgent
+from catchy.core.agents.models import Chunk
 from catchy.core.challenge.models import Challenge
 
 _CODEX_IMAGE = "ghcr.io/betarixm/catchy-codex:latest"
@@ -352,7 +353,8 @@ def test_codex_agent_stream_reaches_openai_when_enabled(
                 metadata_directory=metadata_directory,
             )
             async for message in stream:
-                messages.append(message)
+                if isinstance(message, Chunk):
+                    messages.append(message.text)
             return messages
         finally:
             docker_client.close()

@@ -279,7 +279,7 @@ def challenge_create(request: HttpRequest, ctf_slug: str) -> HttpResponse:
     ctf = get_object_or_404(Ctf, slug=ctf_slug)
     if not ctf.can_init_thread(request.user):
         raise PermissionDenied
-    form = ChallengeForm(request.POST or None, request.FILES or None)
+    form = ChallengeForm(request.POST or None, request.FILES or None, ctf=ctf)
     if request.method == "POST" and form.is_valid():
         challenge = form.save(commit=False)
         challenge.ctf = ctf

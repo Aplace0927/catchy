@@ -11,20 +11,22 @@ from django.test import TestCase
 from django.urls import reverse
 
 from catchy.web.ctf import services
+from catchy.web.ctf.forms import CredentialForm, ModelConfigurationForm
 from catchy.web.ctf.models import (
     AgentConfiguration,
     Challenge,
+    Credential,
     Ctf,
-    Secret,
+    ModelConfiguration,
     SteeringMessage,
     StreamEvent,
     Thread,
 )
 
 
-class SecretAgentPermissionTests(TestCase):
+class CredentialAgentPermissionTests(TestCase):
     def setUp(self) -> None:
-        self.allowed_group = Group.objects.create(name="secret-users")
+        self.allowed_group = Group.objects.create(name="credential-users")
         self.allowed_user = User.objects.create_user(
             username="allowed",
             password="password",
@@ -34,32 +36,60 @@ class SecretAgentPermissionTests(TestCase):
             username="denied",
             password="password",
         )
-        self.secret = Secret.objects.create(name="api-token", value="top-secret")
-        self.secret.allowed_groups.add(self.allowed_group)
+        self.credential = Credential.objects.create(
+            name="OpenAI Token",
+            slug="api-token",
+            api_key="top-secret",
+        )
+        self.credential.allowed_groups.add(self.allowed_group)
 
-    def test_agent_resolves_secret_for_allowed_user(self) -> None:
+    def test_credential_name_accepts_non_slug_text(self) -> None:
+        form = CredentialForm(
+            {
+                "name": "OpenAI Production Key",
+                "slug": "openai-prod",
+                "kind": Credential.Kind.OPENAI,
+                "api_key": "test-key",
+                "base_url": "https://api.openai.com/v1",
+                "organization_id": "",
+            }
+        )
+
+        self.assertTrue(form.is_valid(), form.errors)
+
+    def test_model_name_accepts_non_slug_text(self) -> None:
+        form = ModelConfigurationForm(
+            {
+                "name": "custom model/name",
+                "slug": "custom-model",
+            }
+        )
+
+        self.assertTrue(form.is_valid(), form.errors)
+
+    def test_agent_resolves_credential_for_allowed_user(self) -> None:
         agent = AgentConfiguration(
             name="Codex",
             slug="codex",
-            yaml="model:\n  name: ${secret:api-token}\n",
+            yaml="model:\n  api_key: ${credential:api-token}\n",
         )
 
         self.assertEqual(
             agent.resolved_mapping(user=self.allowed_user),
-            {"model": {"name": "top-secret"}},
+            {"model": {"api_key": "top-secret"}},
         )
 
-    def test_agent_resolution_rejects_disallowed_user(self) -> None:
+    def test_agent_resolution_rejects_disallowed_credential_user(self) -> None:
         agent = AgentConfiguration(
             name="Codex",
             slug="codex",
-            yaml="model:\n  name: ${secret:api-token}\n",
+            yaml="model:\n  api_key: ${credential:api-token}\n",
         )
 
         with self.assertRaises(PermissionDenied):
             agent.resolved_mapping(user=self.denied_user)
 
-    def test_agent_create_rejects_secret_user_cannot_view(self) -> None:
+    def test_agent_create_rejects_credential_user_cannot_view(self) -> None:
         self.client.force_login(self.denied_user)
 
         response = self.client.post(
@@ -67,14 +97,40 @@ class SecretAgentPermissionTests(TestCase):
             {
                 "name": "Codex",
                 "slug": "codex",
-                "yaml": "model:\n  name: ${secret:api-token}\n",
+                "yaml": "model:\n  api_key: ${credential:api-token}\n",
             },
         )
 
         self.assertEqual(response.status_code, 200)
         self.assertFalse(AgentConfiguration.objects.filter(slug="codex").exists())
 
-    def test_thread_create_rejects_agent_secret_user_cannot_view(self) -> None:
+    def test_build_agent_configuration_overlays_model_and_credential(self) -> None:
+        agent = AgentConfiguration.objects.create(
+            name="Codex",
+            slug="codex",
+            yaml="id: codex\nclass: catchy.codex.CodexAgent\nmodel:\n  name: old\n",
+        )
+        model = ModelConfiguration.objects.create(name="gpt-5.5", slug="gpt-55")
+        self.credential.base_url = "https://example.test/v1"
+        self.credential.organization_id = "org_123"
+        self.credential.save(
+            update_fields=["base_url", "organization_id", "updated_at"]
+        )
+
+        data = services.build_agent_configuration(
+            agent,
+            model_configuration=model,
+            credential=self.credential,
+            user=self.allowed_user,
+        )
+
+        self.assertEqual(data["model"]["provider"], "openai")
+        self.assertEqual(data["model"]["name"], "gpt-5.5")
+        self.assertEqual(data["model"]["api_key"], "top-secret")
+        self.assertEqual(data["model"]["base_url"], "https://example.test/v1")
+        self.assertEqual(data["model"]["organization_id"], "org_123")
+
+    def test_thread_create_rejects_credential_user_cannot_view(self) -> None:
         ctf = Ctf.objects.create(title="Study", slug="study")
         challenge = Challenge.objects.create(
             ctf=ctf,
@@ -84,8 +140,9 @@ class SecretAgentPermissionTests(TestCase):
         agent = AgentConfiguration.objects.create(
             name="Codex",
             slug="codex",
-            yaml="model:\n  name: ${secret:api-token}\n",
+            yaml="{}",
         )
+        model = ModelConfiguration.objects.create(name="gpt-5.5", slug="gpt-55")
         self.client.force_login(self.denied_user)
 
         response = self.client.post(
@@ -93,10 +150,14 @@ class SecretAgentPermissionTests(TestCase):
                 "ctf:thread_create",
                 kwargs={"ctf_slug": ctf.slug, "challenge_id": challenge.challenge_id},
             ),
-            {"agent": str(agent.pk)},
+            {
+                "agent": str(agent.pk),
+                "model": str(model.pk),
+                "credential": str(self.credential.pk),
+            },
         )
 
-        self.assertEqual(response.status_code, 403)
+        self.assertRedirects(response, challenge.get_absolute_url())
         self.assertFalse(Thread.objects.exists())
 
 
@@ -114,18 +175,31 @@ class ThreadCreateNameTests(TestCase):
             slug="codex",
             yaml="{}",
         )
+        self.model = ModelConfiguration.objects.create(name="gpt-5.5", slug="gpt-55")
+        self.credential = Credential.objects.create(
+            name="OpenAI",
+            slug="openai",
+            api_key="test-key",
+        )
         self.client.force_login(self.user)
 
     def test_thread_create_accepts_optional_name(self) -> None:
         with patch("catchy.web.ctf.views.start_thread") as start_thread:
             response = self.client.post(
                 self._thread_create_url(),
-                {"agent": str(self.agent.pk), "name": "My First Run"},
+                {
+                    "agent": str(self.agent.pk),
+                    "model": str(self.model.pk),
+                    "credential": str(self.credential.pk),
+                    "name": "My First Run",
+                },
             )
 
         thread = Thread.objects.get()
         self.assertRedirects(response, thread.get_absolute_url())
         self.assertEqual(thread.name, "my-first-run")
+        self.assertEqual(thread.model, self.model)
+        self.assertEqual(thread.credential, self.credential)
         self.assertEqual(str(thread), "my-first-run")
         self.assertEqual(start_thread.call_args.args[0].pk, thread.pk)
 
@@ -133,7 +207,12 @@ class ThreadCreateNameTests(TestCase):
         with patch("catchy.web.ctf.views.start_thread"):
             response = self.client.post(
                 self._thread_create_url(),
-                {"agent": str(self.agent.pk), "name": ""},
+                {
+                    "agent": str(self.agent.pk),
+                    "model": str(self.model.pk),
+                    "credential": str(self.credential.pk),
+                    "name": "",
+                },
             )
 
         thread = Thread.objects.get()

@@ -1,48 +1,45 @@
 {% extends "base.html" %}
 
-{% block title %}Secrets — Catchy{% endblock %}
+{% block title %}Models — Catchy{% endblock %}
 
 {% block content %}
   <div class="crumbs reveal">
     <a href="{% url 'ctf:index' %}">Index</a>
     <span class="sep">/</span>
-    <span class="now">Secrets</span>
+    <span class="now">Models</span>
   </div>
 
   <div class="page-head">
     <div class="title">
-      <h1 class="display reveal" style="margin: 0;">Secrets.</h1>
+      <h1 class="display reveal" style="margin: 0;">Models.</h1>
       <p class="lead reveal" style="margin: 20px 0 0;">
-        Credentials for agents, sealed at rest.
+        Model names available for agent runs.
       </p>
     </div>
     <div class="actions">
-      <a class="btn btn-primary" href="{% url 'ctf:secret_create' %}">New secret</a>
+      <a class="btn btn-primary" href="{% url 'ctf:model_create' %}">New model</a>
     </div>
   </div>
 
   <section class="reveal">
     <div class="section-head">
       <h2>Index</h2>
-      <span class="meta">{{ secrets|length }} secret{{ secrets|length|pluralize }}</span>
+      <span class="meta">{{ models|length }} model{{ models|length|pluralize }}</span>
     </div>
     <ul class="idx-list">
-      {% for secret in secrets %}
+      {% for model in models %}
         <li class="idx-row">
           <span class="idx-num">{{ forloop.counter|stringformat:"03d" }}</span>
           <div class="idx-title">
-            <span class="mono" style="font-size: 17px; color: var(--ink);">{{ secret.name }}</span>
-            {% if secret.label %}
-              <span class="idx-desc">{{ secret.label }}</span>
-            {% endif %}
+            <span class="mono" style="font-size: 17px; color: var(--ink);">{{ model.name }}</span>
+            <span class="idx-desc"><span class="mono muted">/{{ model.slug }}</span></span>
           </div>
           <span class="idx-meta">
-            <span class="status">sealed</span>
+            <span class="status">available</span>
           </span>
-          
         </li>
       {% empty %}
-        <li><div class="empty">No secrets yet.</div></li>
+        <li><div class="empty">No models yet.</div></li>
       {% endfor %}
     </ul>
   </section>

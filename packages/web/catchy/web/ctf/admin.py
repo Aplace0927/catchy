@@ -3,8 +3,9 @@ from django.contrib import admin
 from .models import (
     AgentConfiguration,
     Challenge,
+    Credential,
     Ctf,
-    Secret,
+    ModelConfiguration,
     SteeringMessage,
     StreamEvent,
     Thread,
@@ -12,11 +13,18 @@ from .models import (
 )
 
 
-@admin.register(Secret)
-class SecretAdmin(admin.ModelAdmin):
-    list_display = ["name", "label", "created_at"]
-    search_fields = ["name", "label"]
+@admin.register(Credential)
+class CredentialAdmin(admin.ModelAdmin):
+    list_display = ["name", "slug", "kind", "base_url", "created_at"]
+    search_fields = ["name", "slug", "base_url", "organization_id"]
     filter_horizontal = ["allowed_groups"]
+
+
+@admin.register(ModelConfiguration)
+class ModelConfigurationAdmin(admin.ModelAdmin):
+    list_display = ["name", "slug", "created_at"]
+    search_fields = ["name", "slug"]
+    filter_horizontal = ["view_groups", "use_groups"]
 
 
 @admin.register(AgentConfiguration)
@@ -47,11 +55,13 @@ class ThreadAdmin(admin.ModelAdmin):
         "ctf",
         "challenge",
         "agent",
+        "model",
+        "credential",
         "status",
         "is_public",
         "latest_cost_usd",
     ]
-    list_filter = ["status", "is_public", "ctf", "agent"]
+    list_filter = ["status", "is_public", "ctf", "agent", "model", "credential"]
     search_fields = ["name", "challenge__challenge_id", "ctf__title"]
 
 

@@ -37,6 +37,12 @@
         {% if thread.agent %}
           <span class="muted" style="font-size: 13px;">agent · {{ thread.agent.name }}</span>
         {% endif %}
+        {% if thread.model %}
+          <span class="muted" style="font-size: 13px;">model · {{ thread.model.name }}</span>
+        {% endif %}
+        {% if thread.credential %}
+          <span class="muted" style="font-size: 13px;">credential · {{ thread.credential.name }}</span>
+        {% endif %}
         <span class="muted" style="font-size: 13px;">cost · $<span id="cost" class="num">{{ thread.latest_cost_usd }}</span></span>
       </div>
     </div>

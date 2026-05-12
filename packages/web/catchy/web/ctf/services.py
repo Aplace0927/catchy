@@ -12,6 +12,7 @@ from typing import Any, cast
 
 from asgiref.sync import sync_to_async
 from django.conf import settings
+from django.core.exceptions import PermissionDenied
 from django.db import (
     IntegrityError,
     OperationalError,
@@ -28,6 +29,8 @@ from catchy.core.webhook.models import Webhook
 
 from .models import (
     AgentConfiguration,
+    Credential,
+    ModelConfiguration,
     SteeringMessage,
     StreamEvent,
     Thread,
@@ -61,9 +64,17 @@ def _run_thread_in_local_worker(thread_id: int) -> None:
 
 def run_thread_sync(thread_id: int) -> None:
     thread = (
-        Thread.objects.select_related("challenge", "challenge__ctf", "agent")
+        Thread.objects.select_related(
+            "challenge",
+            "challenge__ctf",
+            "agent",
+            "model",
+            "credential",
+        )
         .select_related("created_by")
-        .prefetch_related("agent__use_groups")
+        .prefetch_related(
+            "agent__use_groups", "model__use_groups", "credential__allowed_groups"
+        )
         .get(pk=thread_id)
     )
 
@@ -94,7 +105,12 @@ def run_thread_sync(thread_id: int) -> None:
     _record_event(thread, source="system", kind="thread.started", text="Thread started")
 
     try:
-        agent = load_agent(thread.agent, user=thread.created_by)
+        agent = load_agent(
+            thread.agent,
+            model_configuration=thread.model,
+            credential=thread.credential,
+            user=thread.created_by,
+        )
         core_challenge = CoreChallenge(
             id=thread.challenge.challenge_id,
             description=thread.challenge.description,
@@ -110,7 +126,7 @@ def run_thread_sync(thread_id: int) -> None:
                 workspace=workspace,
                 metadata=metadata,
                 webhook=webhook,
-                model_name=_agent_model_name(thread.agent, user=thread.created_by),
+                model_name=_thread_model_name(thread),
             )
         )
     except Exception as exc:
@@ -134,9 +150,16 @@ def run_thread_sync(thread_id: int) -> None:
 def load_agent(
     agent_configuration: AgentConfiguration,
     *,
+    model_configuration: ModelConfiguration | None = None,
+    credential: Credential | None = None,
     user: Any | None = None,
 ) -> Agent:
-    data = agent_configuration.resolved_mapping(user=user)
+    data = build_agent_configuration(
+        agent_configuration,
+        model_configuration=model_configuration,
+        credential=credential,
+        user=user,
+    )
     class_path = _agent_class_path(data)
     agent_class = _import_agent_class(class_path)
     configuration_class = getattr(
@@ -157,6 +180,49 @@ def load_agent(
     if not isinstance(agent, Agent):
         raise TypeError(f"from_configuration did not return an Agent: {class_path}")
     return agent
+
+
+def build_agent_configuration(
+    agent_configuration: AgentConfiguration,
+    *,
+    model_configuration: ModelConfiguration | None = None,
+    credential: Credential | None = None,
+    user: Any | None = None,
+) -> dict[str, Any]:
+    if user is not None and not agent_configuration.can_use(user):
+        raise PermissionDenied("agent configuration is not accessible")
+
+    data = dict(agent_configuration.resolved_mapping(user=user))
+    if model_configuration is None and credential is None:
+        return data
+
+    if model_configuration is None:
+        raise ValueError("model configuration is required")
+    if credential is None:
+        raise ValueError("credential is required")
+    if user is not None and not model_configuration.can_use(user):
+        raise PermissionDenied("model configuration is not accessible")
+    if user is not None and not credential.can_view(user):
+        raise PermissionDenied("credential is not accessible")
+    if credential.kind != Credential.Kind.OPENAI:
+        raise ValueError(f"unsupported credential kind: {credential.kind}")
+
+    existing_model = data.get("model", {})
+    model_data = dict(existing_model) if isinstance(existing_model, dict) else {}
+    model_data.update(
+        {
+            "provider": "openai",
+            "name": model_configuration.name,
+            "api_key": credential.api_key,
+            "base_url": credential.base_url,
+        }
+    )
+    if credential.organization_id:
+        model_data["organization_id"] = credential.organization_id
+    else:
+        model_data.pop("organization_id", None)
+    data["model"] = model_data
+    return data
 
 
 def ingest_codex_sessions(thread: Thread, *, model_name: str | None = None) -> None:
@@ -429,12 +495,10 @@ def _import_agent_class(class_path: str) -> type[Any]:
     return agent_class
 
 
-def _agent_model_name(
-    agent_configuration: AgentConfiguration,
-    *,
-    user: Any | None = None,
-) -> str:
-    model = agent_configuration.resolved_mapping(user=user).get("model", {})
+def _thread_model_name(thread: Thread) -> str:
+    if thread.model is not None:
+        return thread.model.name
+    model = thread.agent.resolved_mapping(user=thread.created_by).get("model", {})
     if isinstance(model, dict) and isinstance(model.get("name"), str):
         return str(model["name"])
     return "unknown"

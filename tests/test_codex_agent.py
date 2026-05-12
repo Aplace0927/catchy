@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import io
 import json
 import os
 import select
 import shutil
 import socket
+import tarfile
 import threading
+import tomllib
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, cast
@@ -28,6 +31,121 @@ _STREAM_OUTPUT_PATH = (
     Path(__file__).parent / "fixtures" / "stream_outputs" / "lets_change_stream.json"
 )
 _STREAM_OK_MARKER = "CATCHY_STREAM_OK"
+
+
+def test_codex_config_merges_container_and_runtime_toml(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = object.__new__(CodexAgent)
+    setattr(agent, "_model_name", "gpt-5.5")
+    setattr(agent, "_model_base_url", "https://example.test/v1")
+    setattr(agent, "_model_organization_id", "org_123")
+
+    def container_config(self: CodexAgent) -> dict[str, Any]:
+        return {
+            "sandbox_mode": "danger-full-access",
+            "approval_policy": "never",
+            "otel": {
+                "environment": "dev",
+                "exporter": "none",
+                "log_user_prompt": True,
+            },
+        }
+
+    monkeypatch.setattr(CodexAgent, "_load_container_codex_config", container_config)
+
+    config = agent._build_codex_config(  # pyright: ignore[reportPrivateUsage]
+        {"approval_policy": "on-request", "otel": {"log_user_prompt": False}}
+    )
+
+    assert config["sandbox_mode"] == "danger-full-access"
+    assert config["approval_policy"] == "on-request"
+    assert config["model"] == "gpt-5.5"
+    assert config["openai_base_url"] == "https://example.test/v1"
+    assert config["otel"] == {
+        "environment": "dev",
+        "exporter": "none",
+        "log_user_prompt": False,
+    }
+
+
+def test_codex_home_configuration_is_copied_into_container(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = object.__new__(CodexAgent)
+    setattr(agent, "_model_name", "gpt-5.5")
+    setattr(agent, "_model_api_key", "test-key")
+    setattr(agent, "_model_base_url", "https://example.test/v1")
+    setattr(agent, "_model_organization_id", "org_123")
+    container = _FakeContainer(
+        {"/metadata/.codex/config.toml": 'approval_policy = "on-request"\n'}
+    )
+
+    def container_config(self: CodexAgent) -> dict[str, Any]:
+        return {"sandbox_mode": "danger-full-access", "approval_policy": "never"}
+
+    monkeypatch.setattr(CodexAgent, "_load_container_codex_config", container_config)
+
+    agent._configure_codex_home(  # pyright: ignore[reportPrivateUsage]
+        container, "/metadata/.codex"
+    )
+
+    assert container.commands == [
+        ["sh", "-c", "cat /metadata/.codex/config.toml 2>/dev/null || true"],
+        ["mkdir", "-p", "/metadata/.codex"],
+    ]
+    assert container.files["auth.json"] == json.dumps(
+        {
+            "auth_mode": "apikey",
+            "OPENAI_API_KEY": "test-key",
+            "OPENAI_ORGANIZATION": "org_123",
+            "OPENAI_ORG_ID": "org_123",
+        }
+    )
+    config = tomllib.loads(container.files["config.toml"])
+    assert config["sandbox_mode"] == "danger-full-access"
+    assert config["approval_policy"] == "on-request"
+    assert config["model"] == "gpt-5.5"
+    assert config["openai_base_url"] == "https://example.test/v1"
+
+
+def test_invalid_runtime_codex_config_raises_toml_decode_error() -> None:
+    agent = object.__new__(CodexAgent)
+    container = _FakeContainer({"/metadata/.codex/config.toml": "not = [valid"})
+
+    with pytest.raises(tomllib.TOMLDecodeError):
+        agent._read_container_toml(  # pyright: ignore[reportPrivateUsage]
+            container, "/metadata/.codex/config.toml"
+        )
+
+
+class _ExecResult:
+    def __init__(self, exit_code: int, output: bytes = b"") -> None:
+        self.exit_code = exit_code
+        self.output = output
+
+
+class _FakeContainer:
+    def __init__(self, readable_files: dict[str, str]) -> None:
+        self._readable_files = readable_files
+        self.commands: list[list[str]] = []
+        self.files: dict[str, str] = {}
+
+    def exec_run(self, command: list[str]) -> _ExecResult:
+        self.commands.append(command)
+        if command[:2] == ["sh", "-c"]:
+            path = command[2].removeprefix("cat ").split(" ", 1)[0]
+            return _ExecResult(0, self._readable_files.get(path, "").encode())
+        return _ExecResult(0)
+
+    def put_archive(self, directory: str, data: bytes) -> bool:
+        assert directory == "/metadata/.codex"
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r") as archive:
+            for member in archive.getmembers():
+                file = archive.extractfile(member)
+                assert file is not None
+                self.files[member.name] = file.read().decode()
+        return True
 
 
 class _DockerSocketProxy:
@@ -102,9 +220,8 @@ def docker_base_url(pytestconfig: pytest.Config) -> Iterator[str]:
 
 
 @pytest.fixture
-def run_directories() -> Iterator[tuple[Path, Path]]:
-    root = Path("/tmp/catchy-pytest/lets-change")
-    shutil.rmtree(root, ignore_errors=True)
+def run_directories(tmp_path: Path) -> Iterator[tuple[Path, Path]]:
+    root = tmp_path / "lets-change"
     workspace = root / "workspace"
     metadata = root / "metadata"
     workspace.mkdir(parents=True)
@@ -152,6 +269,12 @@ def test_codex_agent_runs_lets_change_in_recorded_docker_container(
     run_directories: tuple[Path, Path],
 ) -> None:
     monkeypatch.setenv("CATCHY_TEST_OPENAI_API_KEY", "test-openai-api-key")
+    configured_codex_homes: list[str] = []
+
+    def configure_codex_home(self: CodexAgent, container: Any, codex_home: str) -> None:
+        configured_codex_homes.append(codex_home)
+
+    monkeypatch.setattr(CodexAgent, "_configure_codex_home", configure_codex_home)
     workspace, metadata_directory = run_directories
     docker_client = DockerClient(base_url=docker_base_url, timeout=30)
 
@@ -181,7 +304,7 @@ def test_codex_agent_runs_lets_change_in_recorded_docker_container(
         assert "/workspace" in destinations
         assert "/metadata" in destinations
         assert (_CHALLENGE_ROOT / "source" / "challenge.c").is_file()
-        assert (metadata_directory / ".codex" / "auth.json").exists()
+        assert configured_codex_homes == ["/metadata/.codex"]
     finally:
         docker_client.close()
 

@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import io
 import json
 import logging
+import shlex
+import tarfile
+import tomllib
 from contextlib import contextmanager
 from decimal import Decimal
 from pathlib import Path
@@ -42,6 +46,7 @@ from pydantic import (
     field_serializer,
     field_validator,
 )
+import tomli_w
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -53,7 +58,9 @@ class TokenUsage(BaseModel):
     cached_input_tokens: int = 0
     output_tokens: int = 0
 
-    @field_validator("input_tokens", "cached_input_tokens", "output_tokens", mode="before")
+    @field_validator(
+        "input_tokens", "cached_input_tokens", "output_tokens", mode="before"
+    )
     @classmethod
     def _deserialize_token_count(cls, value: object) -> int:
         return _int_value(value)
@@ -102,9 +109,7 @@ class CostEstimate(BaseModel):
             if self.pricing is None
             else {
                 "input_per_million": str(self.pricing.input_per_million),
-                "cached_input_per_million": str(
-                    self.pricing.cached_input_per_million
-                ),
+                "cached_input_per_million": str(self.pricing.cached_input_per_million),
                 "output_per_million": str(self.pricing.output_per_million),
             },
         }
@@ -284,10 +289,26 @@ def _int_value(value: object) -> int:
     return 0
 
 
+def _deep_merge(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(left)
+    for key, value in right.items():
+        existing = merged.get(key)
+        if isinstance(existing, dict) and isinstance(value, dict):
+            merged[key] = _deep_merge(
+                cast(dict[str, Any], existing),
+                cast(dict[str, Any], value),
+            )
+        else:
+            merged[key] = value
+    return merged
+
+
 class _Model(BaseModel):
     provider: Literal["openai"] = "openai"
     name: str = "gpt-5.5"
     api_key: str
+    base_url: str | None = None
+    organization_id: str | None = None
 
 
 class _Directory(BaseModel):
@@ -352,6 +373,8 @@ class CodexAgent(Agent):
             id=configuration.id,
             model_name=configuration.model.name,
             model_api_key=configuration.model.api_key,
+            model_base_url=configuration.model.base_url,
+            model_organization_id=configuration.model.organization_id,
             container_challenge_directory=configuration.directory.challenge,
             container_workspace_directory=configuration.directory.workspace,
             container_metadata_directory=configuration.directory.metadata,
@@ -374,12 +397,16 @@ class CodexAgent(Agent):
         docker_image: Image,
         docker_client: DockerClient,
         user_prompt_template: str,
+        model_base_url: str | None = None,
+        model_organization_id: str | None = None,
         docker_socket: str = "/var/run/docker.sock",
         # model_config: JsonObject = {},
     ):
         self._id = id
         self._model_name = model_name
         self._model_api_key = model_api_key
+        self._model_base_url = model_base_url
+        self._model_organization_id = model_organization_id
         self._container_challenge_directory = container_challenge_directory
         self._container_workspace_directory = container_workspace_directory
         self._container_metadata_directory = container_metadata_directory
@@ -420,6 +447,8 @@ class CodexAgent(Agent):
             model=_Model(
                 name=self._model_name,
                 api_key=self._model_api_key,
+                base_url=self._model_base_url,
+                organization_id=self._model_organization_id,
             ),
             directory=_Directory(
                 challenge=self._container_challenge_directory,
@@ -577,13 +606,6 @@ class CodexAgent(Agent):
         assert metadata_directory.is_dir()
 
         codex_home = f"{self._container_metadata_directory}/.codex"
-        host_codex_home = metadata_directory / ".codex"
-        host_codex_home.mkdir(parents=True, exist_ok=True)
-        (host_codex_home / "auth.json").write_text(
-            json.dumps(
-                {"auth_mode": "apikey", "OPENAI_API_KEY": self._model_api_key}
-            ),
-        )
 
         container = self._docker_client.containers.run(
             self._docker_image,
@@ -614,22 +636,23 @@ class CodexAgent(Agent):
             },
         )
 
-        _LOGGER.info(f"({self._id}) Started Docker container: {container.id}")
-        container.reload()
-        chrome_devtools_bindings = container.attrs["NetworkSettings"]["Ports"].get(
-            "9222/tcp"
-        )
-        if chrome_devtools_bindings:
-            chrome_devtools_url = (
-                f"http://{chrome_devtools_bindings[0]['HostIp']}:"
-                f"{chrome_devtools_bindings[0]['HostPort']}"
-            )
-            _LOGGER.info(
-                f"({self._id}) Chrome DevTools Protocol available after running "
-                f"`chrome-devtools`: {chrome_devtools_url}"
-            )
-
         try:
+            _LOGGER.info(f"({self._id}) Started Docker container: {container.id}")
+            self._configure_codex_home(container, codex_home)
+            container.reload()
+            chrome_devtools_bindings = container.attrs["NetworkSettings"]["Ports"].get(
+                "9222/tcp"
+            )
+            if chrome_devtools_bindings:
+                chrome_devtools_url = (
+                    f"http://{chrome_devtools_bindings[0]['HostIp']}:"
+                    f"{chrome_devtools_bindings[0]['HostPort']}"
+                )
+                _LOGGER.info(
+                    f"({self._id}) Chrome DevTools Protocol available after running "
+                    f"`chrome-devtools`: {chrome_devtools_url}"
+                )
+
             yield container
         finally:
             _LOGGER.info(
@@ -637,3 +660,82 @@ class CodexAgent(Agent):
             )
             container.remove(force=True)
             _LOGGER.info(f"({self._id}) Docker container removed: {container.id}")
+
+    def _configure_codex_home(self, container: Any, codex_home: str) -> None:
+        runtime_config = self._read_container_toml(
+            container, f"{codex_home}/config.toml"
+        )
+        auth_payload = {"auth_mode": "apikey", "OPENAI_API_KEY": self._model_api_key}
+        if self._model_organization_id:
+            auth_payload["OPENAI_ORGANIZATION"] = self._model_organization_id
+            auth_payload["OPENAI_ORG_ID"] = self._model_organization_id
+
+        self._put_container_files(
+            container,
+            codex_home,
+            {
+                "auth.json": json.dumps(auth_payload),
+                "config.toml": tomli_w.dumps(self._build_codex_config(runtime_config)),
+            },
+        )
+
+    def _build_codex_config(
+        self, runtime_config: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        config = _deep_merge(
+            self._load_container_codex_config(),
+            runtime_config or {},
+        )
+        config["model"] = self._model_name
+        if self._model_base_url:
+            config["openai_base_url"] = self._model_base_url
+        return config
+
+    def _read_container_toml(self, container: Any, path: str) -> dict[str, Any]:
+        output = self._run_container_command(
+            container,
+            ["sh", "-c", f"cat {shlex.quote(path)} 2>/dev/null || true"],
+        )
+        return tomllib.loads(output.decode())
+
+    def _put_container_files(
+        self, container: Any, directory: str, files: dict[str, str]
+    ) -> None:
+        self._run_container_command(container, ["mkdir", "-p", directory])
+        archive_buffer = io.BytesIO()
+        with tarfile.open(fileobj=archive_buffer, mode="w") as archive:
+            for name, content in files.items():
+                encoded = content.encode()
+                info = tarfile.TarInfo(name=name)
+                info.size = len(encoded)
+                archive.addfile(info, io.BytesIO(encoded))
+        archive_buffer.seek(0)
+        if not container.put_archive(directory, archive_buffer.getvalue()):
+            raise RuntimeError(f"failed to copy Codex configuration into {directory}")
+
+    def _run_container_command(self, container: Any, command: list[str]) -> bytes:
+        result = container.exec_run(command)
+        exit_code = int(getattr(result, "exit_code", 1))
+        output = getattr(result, "output", b"")
+        if exit_code != 0:
+            text = output.decode() if isinstance(output, bytes) else str(output)
+            raise RuntimeError(f"container command failed: {command!r}: {text}")
+        return output if isinstance(output, bytes) else str(output).encode()
+
+    def _load_container_codex_config(self) -> dict[str, Any]:
+        paths = [
+            f"{self._container_metadata_directory}/.codex/config.toml",
+            "/metadata/.codex/config.toml",
+        ]
+        for path in dict.fromkeys(paths):
+            try:
+                output = self._docker_client.containers.run(
+                    self._docker_image,
+                    command=["cat", path],
+                    remove=True,
+                )
+            except DockerException:
+                continue
+            text = output.decode()
+            return tomllib.loads(text)
+        return {}

@@ -20,8 +20,8 @@ from omegaconf.errors import InterpolationResolutionError
 if TYPE_CHECKING:
     from django.contrib.auth.models import AbstractUser
 
-_secret_resolver_user: ContextVar[Any | None] = ContextVar(
-    "catchy_secret_resolver_user",
+_credential_resolver_user: ContextVar[Any | None] = ContextVar(
+    "catchy_credential_resolver_user",
     default=None,
 )
 
@@ -80,27 +80,65 @@ class TimeStampedModel(models.Model):
         abstract = True
 
 
-class Secret(TimeStampedModel):
-    name = models.SlugField(unique=True)
-    label = models.CharField(max_length=200, blank=True)
-    value = models.TextField()
-    allowed_groups = models.ManyToManyField(Group, blank=True, related_name="secrets")
+class Credential(TimeStampedModel):
+    class Kind(models.TextChoices):
+        OPENAI = "openai", "OpenAI"
+
+    name = models.CharField(max_length=200)
+    slug = models.SlugField(max_length=200, unique=True)
+    kind = models.CharField(max_length=30, choices=Kind.choices, default=Kind.OPENAI)
+    api_key = models.TextField()
+    base_url = models.URLField(default="https://api.openai.com/v1")
+    organization_id = models.CharField(max_length=200, blank=True)
+    allowed_groups = models.ManyToManyField(
+        Group, blank=True, related_name="credentials"
+    )
     created_by = models.ForeignKey(
         django_settings.AUTH_USER_MODEL,
         null=True,
         blank=True,
         on_delete=models.SET_NULL,
-        related_name="created_secrets",
+        related_name="created_credentials",
     )
 
     class Meta:
         ordering = ["name"]
 
     def __str__(self) -> str:
-        return self.label or self.name
+        return self.name
 
     def can_view(self, user: AbstractUser) -> bool:
         return _can_access_grouped_object(user, self.allowed_groups)
+
+
+class ModelConfiguration(TimeStampedModel):
+    name = models.CharField(max_length=200)
+    slug = models.SlugField(max_length=200, unique=True)
+    view_groups = models.ManyToManyField(
+        Group, blank=True, related_name="viewable_model_configurations"
+    )
+    use_groups = models.ManyToManyField(
+        Group, blank=True, related_name="usable_model_configurations"
+    )
+    created_by = models.ForeignKey(
+        django_settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="created_model_configurations",
+    )
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self) -> str:
+        return self.name
+
+    def can_view(self, user: AbstractUser) -> bool:
+        return _can_access_grouped_object(user, self.view_groups)
+
+    def can_use(self, user: AbstractUser) -> bool:
+        return _can_access_grouped_object(user, self.use_groups)
 
 
 class AgentConfiguration(TimeStampedModel):
@@ -137,9 +175,9 @@ class AgentConfiguration(TimeStampedModel):
         return _can_access_grouped_object(user, self.use_groups)
 
     def resolved_yaml(self, *, user: Any | None = None) -> str:
-        register_secret_resolver()
+        register_credential_resolver()
         config = OmegaConf.create(self.yaml)
-        with resolve_secrets_as(user):
+        with resolve_credentials_as(user):
             try:
                 return OmegaConf.to_yaml(config, resolve=True)
             except InterpolationResolutionError as exc:
@@ -147,8 +185,8 @@ class AgentConfiguration(TimeStampedModel):
                 raise
 
     def resolved_mapping(self, *, user: Any | None = None) -> dict[str, Any]:
-        register_secret_resolver()
-        with resolve_secrets_as(user):
+        register_credential_resolver()
+        with resolve_credentials_as(user):
             try:
                 data = OmegaConf.to_container(OmegaConf.create(self.yaml), resolve=True)
             except InterpolationResolutionError as exc:
@@ -272,6 +310,20 @@ class Thread(TimeStampedModel):
     agent = models.ForeignKey(
         AgentConfiguration, on_delete=models.PROTECT, related_name="threads"
     )
+    model = models.ForeignKey(
+        ModelConfiguration,
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="threads",
+    )
+    credential = models.ForeignKey(
+        Credential,
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="threads",
+    )
     created_by = models.ForeignKey(
         django_settings.AUTH_USER_MODEL,
         null=True,
@@ -372,28 +424,29 @@ class ThreadCostSnapshot(TimeStampedModel):
         ordering = ["created_at"]
 
 
-def register_secret_resolver() -> None:
-    OmegaConf.register_new_resolver("secret", _resolve_secret, replace=True)
+def register_credential_resolver() -> None:
+    OmegaConf.register_new_resolver("credential", _resolve_credential, replace=True)
+    OmegaConf.register_new_resolver("secret", _resolve_credential, replace=True)
 
 
 @contextmanager
-def resolve_secrets_as(user: Any | None) -> Iterator[None]:
-    token = _secret_resolver_user.set(user)
+def resolve_credentials_as(user: Any | None) -> Iterator[None]:
+    token = _credential_resolver_user.set(user)
     try:
         yield
     finally:
-        _secret_resolver_user.reset(token)
+        _credential_resolver_user.reset(token)
 
 
-def _resolve_secret(name: str) -> str:
-    user = _secret_resolver_user.get()
+def _resolve_credential(name: str) -> str:
+    user = _credential_resolver_user.get()
     if user is None:
-        raise PermissionDenied("secret resolver requires an authenticated user")
+        raise PermissionDenied("credential resolver requires an authenticated user")
 
-    secret = Secret.objects.prefetch_related("allowed_groups").get(name=name)
-    if not secret.can_view(user):
-        raise PermissionDenied(f"secret is not accessible: {name}")
-    return secret.value
+    credential = Credential.objects.prefetch_related("allowed_groups").get(slug=name)
+    if not credential.can_view(user):
+        raise PermissionDenied(f"credential is not accessible: {name}")
+    return credential.api_key
 
 
 def _raise_permission_denied_from_interpolation(

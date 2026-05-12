@@ -7,14 +7,28 @@ from django import forms
 from django.utils.text import slugify
 from omegaconf import OmegaConf
 
-from .models import AgentConfiguration, Challenge, Ctf, Secret
+from .models import AgentConfiguration, Challenge, Credential, Ctf, ModelConfiguration
 
 
-class SecretForm(forms.ModelForm):
+class CredentialForm(forms.ModelForm):
     class Meta:
-        model = Secret
-        fields = ["name", "label", "value", "allowed_groups"]
-        widgets = {"value": forms.PasswordInput(render_value=True)}
+        model = Credential
+        fields = [
+            "name",
+            "slug",
+            "kind",
+            "api_key",
+            "base_url",
+            "organization_id",
+            "allowed_groups",
+        ]
+        widgets = {"api_key": forms.PasswordInput(render_value=True)}
+
+
+class ModelConfigurationForm(forms.ModelForm):
+    class Meta:
+        model = ModelConfiguration
+        fields = ["name", "slug", "view_groups", "use_groups"]
 
 
 class AgentConfigurationForm(forms.ModelForm):
@@ -113,9 +127,9 @@ class ChallengeForm(forms.ModelForm):
                 "preferred_language", ""
             )
             if existing_webhook_url:
-                self.fields["webhook_url"].help_text = (
-                    "A webhook URL is set. Leave blank to keep it, or enter a new URL to replace."
-                )
+                self.fields[
+                    "webhook_url"
+                ].help_text = "A webhook URL is set. Leave blank to keep it, or enter a new URL to replace."
                 self.fields["webhook_url"].widget.attrs["placeholder"] = (
                     "(URL set — leave blank to keep)"
                 )
@@ -203,6 +217,8 @@ class ThreadCreateForm(forms.Form):
         widget=forms.TextInput(attrs={"placeholder": "bright-cipher-0427"}),
     )
     agent = forms.ModelChoiceField(queryset=AgentConfiguration.objects.none())
+    model = forms.ModelChoiceField(queryset=ModelConfiguration.objects.none())
+    credential = forms.ModelChoiceField(queryset=Credential.objects.none())
 
     def __init__(
         self,
@@ -218,6 +234,22 @@ class ThreadCreateForm(forms.Form):
         ]
         self.fields["agent"].queryset = AgentConfiguration.objects.filter(
             pk__in=agent_ids
+        )
+        model_ids = [
+            model.pk
+            for model in ModelConfiguration.objects.prefetch_related("use_groups")
+            if model.can_use(user)
+        ]
+        self.fields["model"].queryset = ModelConfiguration.objects.filter(
+            pk__in=model_ids
+        )
+        credential_ids = [
+            credential.pk
+            for credential in Credential.objects.prefetch_related("allowed_groups")
+            if credential.can_view(user)
+        ]
+        self.fields["credential"].queryset = Credential.objects.filter(
+            pk__in=credential_ids
         )
 
     def clean_name(self) -> str:

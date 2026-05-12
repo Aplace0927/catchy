@@ -65,7 +65,13 @@
               <span class="idx-num">{{ forloop.counter|stringformat:"03d" }}</span>
               <div class="idx-title">
                 <a href="{{ thread.get_absolute_url }}">{{ thread }}</a>
-                {% if thread.agent %}<span class="idx-desc"><span class="mono muted">{{ thread.agent.name }}</span></span>{% endif %}
+                {% if thread.agent %}
+                  <span class="idx-desc">
+                    <span class="mono muted">{{ thread.agent.name }}</span>
+                    {% if thread.model %} · <span class="mono muted">{{ thread.model.name }}</span>{% endif %}
+                    {% if thread.credential %} · <span class="mono muted">{{ thread.credential.name }}</span>{% endif %}
+                  </span>
+                {% endif %}
               </div>
               <span class="idx-meta">
                 <span class="status status-{{ thread.status }}">{{ thread.status }}</span>

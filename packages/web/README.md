@@ -1,7 +1,7 @@
 # Catchy Web
 
-Django 6 web UI for managing CTF challenges, agent YAML, secrets, threads, and
-stream archives.
+Django 6 web UI for managing CTF challenges, agent YAML, model names,
+credentials, threads, and stream archives.
 
 ```bash
 uv sync

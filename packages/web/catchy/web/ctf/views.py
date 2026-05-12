@@ -19,20 +19,22 @@ from django.views.decorators.http import require_POST
 from .forms import (
     AgentConfigurationForm,
     ChallengeForm,
+    CredentialForm,
     CtfForm,
-    SecretForm,
+    ModelConfigurationForm,
     ThreadCreateForm,
 )
 from .models import (
     AgentConfiguration,
     Challenge,
+    Credential,
     Ctf,
-    Secret,
+    ModelConfiguration,
     SteeringMessage,
     StreamEvent,
     Thread,
 )
-from .services import start_thread
+from .services import build_agent_configuration, start_thread
 
 
 class _ChallengeGroup(TypedDict):
@@ -57,14 +59,16 @@ def index(request: HttpRequest) -> HttpResponse:
     if request.user.is_authenticated:
         thread_filter |= Q(ctf_id__in=ctf_ids)
     threads = (
-        Thread.objects.select_related("ctf", "challenge", "agent")
+        Thread.objects.select_related(
+            "ctf", "challenge", "agent", "model", "credential"
+        )
         .filter(thread_filter)
         .distinct()[:20]
     )
     public_thread_groups = _group_threads_by_ctf_and_challenge(
-        Thread.objects.select_related("ctf", "challenge", "agent").filter(
-            is_public=True
-        )[:40]
+        Thread.objects.select_related(
+            "ctf", "challenge", "agent", "model", "credential"
+        ).filter(is_public=True)[:40]
     )
     public_thread_count = sum(group["thread_count"] for group in public_thread_groups)
     return render(
@@ -80,26 +84,59 @@ def index(request: HttpRequest) -> HttpResponse:
 
 
 @login_required
-def secret_list(request: HttpRequest) -> HttpResponse:
-    secrets = [
-        secret
-        for secret in Secret.objects.prefetch_related("allowed_groups")
-        if secret.can_view(request.user)
+def credential_list(request: HttpRequest) -> HttpResponse:
+    credentials = [
+        credential
+        for credential in Credential.objects.prefetch_related("allowed_groups")
+        if credential.can_view(request.user)
     ]
-    return render(request, "ctf/secret_list.html", {"secrets": secrets})
+    return render(
+        request,
+        "ctf/credential_list.html",
+        {"credentials": credentials},
+    )
 
 
 @login_required
-def secret_create(request: HttpRequest) -> HttpResponse:
-    form = SecretForm(request.POST or None)
+def credential_create(request: HttpRequest) -> HttpResponse:
+    form = CredentialForm(request.POST or None)
     if request.method == "POST" and form.is_valid():
-        secret = form.save(commit=False)
-        secret.created_by = request.user
-        secret.save()
+        credential = form.save(commit=False)
+        credential.created_by = request.user
+        credential.save()
         form.save_m2m()
-        messages.success(request, "Secret saved.")
-        return redirect("ctf:secret_list")
-    return render(request, "ctf/form.html", {"form": form, "title": "New secret"})
+        messages.success(request, "Credential saved.")
+        return redirect("ctf:credential_list")
+    return render(
+        request,
+        "ctf/form.html",
+        {"form": form, "title": "New credential"},
+    )
+
+
+@login_required
+def model_list(request: HttpRequest) -> HttpResponse:
+    models = [
+        model
+        for model in ModelConfiguration.objects.prefetch_related(
+            "view_groups", "use_groups"
+        )
+        if model.can_view(request.user)
+    ]
+    return render(request, "ctf/model_list.html", {"models": models})
+
+
+@login_required
+def model_create(request: HttpRequest) -> HttpResponse:
+    form = ModelConfigurationForm(request.POST or None)
+    if request.method == "POST" and form.is_valid():
+        model = form.save(commit=False)
+        model.created_by = request.user
+        model.save()
+        form.save_m2m()
+        messages.success(request, "Model saved.")
+        return redirect("ctf:model_list")
+    return render(request, "ctf/form.html", {"form": form, "title": "New model"})
 
 
 @login_required
@@ -285,7 +322,7 @@ def challenge_detail(
         {
             "ctf": ctf,
             "challenge": challenge,
-            "threads": challenge.threads.select_related("agent"),
+            "threads": challenge.threads.select_related("agent", "model", "credential"),
             "thread_form": thread_form,
             "can_init": ctf.can_init_thread(request.user),
         },
@@ -310,19 +347,32 @@ def thread_create(
     agent = form.cleaned_data["agent"]
     if not agent.can_use(request.user):
         raise PermissionDenied
+    model = form.cleaned_data["model"]
+    if not model.can_use(request.user):
+        raise PermissionDenied
+    credential = form.cleaned_data["credential"]
+    if not credential.can_view(request.user):
+        raise PermissionDenied
 
     try:
-        agent.resolved_mapping(user=request.user)
+        build_agent_configuration(
+            agent,
+            model_configuration=model,
+            credential=credential,
+            user=request.user,
+        )
     except PermissionDenied:
         raise
     except Exception as exc:
-        messages.error(request, f"Could not resolve agent YAML: {exc}")
+        messages.error(request, f"Could not resolve agent configuration: {exc}")
         return redirect(challenge)
 
     thread = Thread.objects.create(
         ctf=ctf,
         challenge=challenge,
         agent=agent,
+        model=model,
+        credential=credential,
         created_by=request.user,
         name=form.cleaned_data["name"],
     )
@@ -333,7 +383,9 @@ def thread_create(
 
 def thread_detail(request: HttpRequest, pk: int) -> HttpResponse:
     thread = get_object_or_404(
-        Thread.objects.select_related("ctf", "challenge", "agent"),
+        Thread.objects.select_related(
+            "ctf", "challenge", "agent", "model", "credential"
+        ),
         pk=pk,
     )
     if not thread.can_view(request.user):

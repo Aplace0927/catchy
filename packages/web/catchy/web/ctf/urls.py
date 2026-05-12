@@ -6,8 +6,10 @@ app_name = "ctf"
 
 urlpatterns = [
     path("", views.index, name="index"),
-    path("secrets/", views.secret_list, name="secret_list"),
-    path("secrets/new/", views.secret_create, name="secret_create"),
+    path("credentials/", views.credential_list, name="credential_list"),
+    path("credentials/new/", views.credential_create, name="credential_create"),
+    path("models/", views.model_list, name="model_list"),
+    path("models/new/", views.model_create, name="model_create"),
     path("agents/", views.agent_list, name="agent_list"),
     path("agents/new/", views.agent_create, name="agent_create"),
     path("agents/<slug:slug>/", views.agent_detail, name="agent_detail"),
@@ -15,7 +17,11 @@ urlpatterns = [
     path("ctfs/new/", views.ctf_create, name="ctf_create"),
     path("ctfs/<slug:slug>/", views.ctf_detail, name="ctf_detail"),
     path("ctfs/<slug:slug>/edit/", views.ctf_update, name="ctf_update"),
-    path("ctfs/<slug:ctf_slug>/challenges/new/", views.challenge_create, name="challenge_create"),
+    path(
+        "ctfs/<slug:ctf_slug>/challenges/new/",
+        views.challenge_create,
+        name="challenge_create",
+    ),
     path(
         "ctfs/<slug:ctf_slug>/challenges/<slug:challenge_id>/",
         views.challenge_detail,

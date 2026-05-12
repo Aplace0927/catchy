@@ -50,6 +50,7 @@ from .models import (
 
 _STREAM_EVENT_WRITE_ATTEMPTS = 6
 _STREAM_EVENT_WRITE_RETRY_DELAY_SECONDS = 0.05
+_CODEX_RUNTIME_METADATA_DIRS = frozenset({".tmp", "tmp"})
 
 
 def start_thread(thread: Thread) -> Any:
@@ -87,7 +88,12 @@ def fork_thread(thread: Thread, *, user: Any | None = None) -> Thread:
     if thread.metadata_path:
         source_metadata = Path(thread.metadata_path)
         if source_metadata.exists():
-            shutil.copytree(source_metadata, metadata, dirs_exist_ok=True)
+            shutil.copytree(
+                source_metadata,
+                metadata,
+                dirs_exist_ok=True,
+                ignore=_ignore_runtime_metadata,
+            )
 
     fork.thread_root = str(thread_root)
     fork.workspace_path = str(workspace)
@@ -119,6 +125,12 @@ def fork_thread(thread: Thread, *, user: Any | None = None) -> Thread:
         raw={"source_thread_id": thread.pk},
     )
     return fork
+
+
+def _ignore_runtime_metadata(directory: str, names: list[str]) -> set[str]:
+    if Path(directory).name != ".codex":
+        return set()
+    return set(_CODEX_RUNTIME_METADATA_DIRS.intersection(names))
 
 
 def _run_thread_in_local_worker(thread_id: int) -> None:

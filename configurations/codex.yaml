@@ -1,4 +1,4 @@
-id: codex-gpt-5.5
+id: codex
 class: catchy.codex.CodexAgent
 model:
   provider: openai

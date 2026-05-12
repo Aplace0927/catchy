@@ -33,6 +33,8 @@ jobs:
           context: containers/ubuntu
           file: containers/ubuntu/Dockerfile
           push: true
+          cache-from: type=gha,scope=catchy-ubuntu
+          cache-to: type=gha,mode=max,scope=catchy-ubuntu
           tags: |
             ${{ env.UBUNTU_IMAGE_NAME }}:26.04
             ${{ env.UBUNTU_IMAGE_NAME }}:${{ github.sha }}
@@ -53,6 +55,8 @@ jobs:
           context: containers/codex
           file: containers/codex/Dockerfile
           push: true
+          cache-from: type=gha,scope=catchy-codex
+          cache-to: type=gha,mode=max,scope=catchy-codex
           tags: |
             ${{ env.IMAGE_NAME }}:latest
             ${{ env.IMAGE_NAME }}:${{ github.sha }}
@@ -73,6 +77,8 @@ jobs:
           context: containers/claude-code
           file: containers/claude-code/Dockerfile
           push: true
+          cache-from: type=gha,scope=catchy-claude-code
+          cache-to: type=gha,mode=max,scope=catchy-claude-code
           tags: |
             ${{ env.CLAUDE_CODE_IMAGE_NAME }}:latest
             ${{ env.CLAUDE_CODE_IMAGE_NAME }}:${{ github.sha }}

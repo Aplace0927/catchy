@@ -1,0 +1,78 @@
+name: Build and Publish Agent Images
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/build-and-publish-agent-images.yml
+      - containers/ubuntu/Dockerfile
+      - containers/codex/Dockerfile
+      - containers/codex/config.toml
+      - containers/claude-code/Dockerfile
+      - containers/claude-code/settings.json
+permissions:
+  contents: read
+  packages: write
+env:
+  UBUNTU_IMAGE_NAME: ghcr.io/betarixm/catchy-ubuntu
+  IMAGE_NAME: ghcr.io/betarixm/catchy-codex
+  CLAUDE_CODE_IMAGE_NAME: ghcr.io/betarixm/catchy-claude-code
+jobs:
+  publish-ubuntu:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: containers/ubuntu
+          file: containers/ubuntu/Dockerfile
+          push: true
+          tags: |
+            ${{ env.UBUNTU_IMAGE_NAME }}:26.04
+            ${{ env.UBUNTU_IMAGE_NAME }}:${{ github.sha }}
+
+  publish-codex:
+    runs-on: ubuntu-latest
+    needs: publish-ubuntu
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: containers/codex
+          file: containers/codex/Dockerfile
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:latest
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+  publish-claude-code:
+    runs-on: ubuntu-latest
+    needs: publish-ubuntu
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: containers/claude-code
+          file: containers/claude-code/Dockerfile
+          push: true
+          tags: |
+            ${{ env.CLAUDE_CODE_IMAGE_NAME }}:latest
+            ${{ env.CLAUDE_CODE_IMAGE_NAME }}:${{ github.sha }}

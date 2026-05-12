@@ -161,6 +161,33 @@ class CredentialAgentPermissionTests(TestCase):
         self.assertFalse(Thread.objects.exists())
 
 
+class ModelConfigurationViewTests(TestCase):
+    def setUp(self) -> None:
+        self.user = User.objects.create_user(username="member", password="password")
+        self.group = Group.objects.create(name="model-users")
+        self.user.groups.add(self.group)
+        self.model = ModelConfiguration.objects.create(name="gpt-5.5", slug="gpt-55")
+        self.client.force_login(self.user)
+
+    def test_model_update_edits_model_configuration(self) -> None:
+        response = self.client.post(
+            reverse("ctf:model_update", kwargs={"slug": self.model.slug}),
+            {
+                "name": "gpt-5.5 latest",
+                "slug": "gpt-55-latest",
+                "view_groups": [str(self.group.pk)],
+                "use_groups": [str(self.group.pk)],
+            },
+        )
+
+        self.assertRedirects(response, reverse("ctf:model_list"))
+        self.model.refresh_from_db()
+        self.assertEqual(self.model.name, "gpt-5.5 latest")
+        self.assertEqual(self.model.slug, "gpt-55-latest")
+        self.assertEqual(list(self.model.view_groups.all()), [self.group])
+        self.assertEqual(list(self.model.use_groups.all()), [self.group])
+
+
 class ThreadCreateNameTests(TestCase):
     def setUp(self) -> None:
         self.user = User.objects.create_user(username="member", password="password")

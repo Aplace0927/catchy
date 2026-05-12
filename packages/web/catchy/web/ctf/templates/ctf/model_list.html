@@ -28,14 +28,14 @@
     </div>
     <ul class="idx-list">
       {% for model in models %}
-        <li class="idx-row">
+        <li class="idx-row" onclick="window.location='{% url 'ctf:model_update' slug=model.slug %}'">
           <span class="idx-num">{{ forloop.counter|stringformat:"03d" }}</span>
           <div class="idx-title">
-            <span class="mono" style="font-size: 17px; color: var(--ink);">{{ model.name }}</span>
+            <a href="{% url 'ctf:model_update' slug=model.slug %}" class="mono" style="font-size: 17px; color: var(--ink);">{{ model.name }}</a>
             <span class="idx-desc"><span class="mono muted">/{{ model.slug }}</span></span>
           </div>
           <span class="idx-meta">
-            <span class="status">available</span>
+            <a class="btn btn-sm" href="{% url 'ctf:model_update' slug=model.slug %}" onclick="event.stopPropagation()">Edit</a>
           </span>
         </li>
       {% empty %}

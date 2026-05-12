@@ -140,6 +140,27 @@ def model_create(request: HttpRequest) -> HttpResponse:
 
 
 @login_required
+def model_update(request: HttpRequest, slug: str) -> HttpResponse:
+    model = get_object_or_404(
+        ModelConfiguration.objects.prefetch_related("view_groups", "use_groups"),
+        slug=slug,
+    )
+    if not model.can_view(request.user):
+        raise PermissionDenied
+
+    form = ModelConfigurationForm(request.POST or None, instance=model)
+    if request.method == "POST" and form.is_valid():
+        form.save()
+        messages.success(request, "Model updated.")
+        return redirect("ctf:model_list")
+    return render(
+        request,
+        "ctf/form.html",
+        {"form": form, "title": f"Edit model: {model.name}"},
+    )
+
+
+@login_required
 def agent_list(request: HttpRequest) -> HttpResponse:
     agents = [
         agent

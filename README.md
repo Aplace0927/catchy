@@ -4,20 +4,20 @@
 
 **Ca-ca-catch my flag, baby.**
 
-Autonomous AI agent that plays capture-the-flag challenges.
+Autonomous AI agent runner for capture-the-flag challenges.
 
-<sub>[Web](https://catchy.bxta.kr) &nbsp;·&nbsp; [TUI App](./scripts/app.py) &nbsp;·&nbsp; [CLI Runner](./scripts/run.py)</sub>
+<sub>[Web](https://catchy.bxta.kr)</sub>
 
 <br/>
 <br/>
 
-<img src="assets/app.png" alt="Catchy TUI — multi-stream agent runner" width="900" />
+<img src="assets/app.png" alt="Catchy app" width="900" />
 
 </div>
 
 ## What is this
 
-Catchy plugs an agent into a CTF challenge, runs it inside a sandboxed workspace, and streams every reasoning step, command, and file change to your terminal. Multiple challenge threads can run side-by-side in the TUI, and each thread gets its own workspace, agent model, and event log.
+Catchy plugs an agent into a CTF challenge, runs it inside a sandboxed workspace, and streams reasoning steps, commands, file changes, costs, and run state into a Django web UI. Each challenge can have multiple threads, and each thread gets its own source extraction, writable workspace, metadata directory, agent configuration, model, credential, and event log.
 
 ## Quick start
 
@@ -25,65 +25,45 @@ Catchy plugs an agent into a CTF challenge, runs it inside a sandboxed workspace
 # 1. Install dependencies — uv handles the workspace + venv
 uv sync
 
-# 2. Set your OpenAI API key
+# 2. Set your OpenAI API key, or add it later as a web credential
 export OPENAI_API_KEY=sk-...
 
-# 3. Launch the TUI on a challenge
-uv run scripts/app.py challenges/lets-change
+# 3. Prepare the Django database
+uv run python -m catchy.web.manage migrate
+uv run python -m catchy.web.manage createsuperuser
+
+# 4. Start the web app
+uv run python -m catchy.web.manage runserver
 ```
+
+Open <http://127.0.0.1:8000>, sign in, then create a credential, model, agent configuration, CTF, and challenge. Start a thread from the challenge page to run the agent and stream its output.
 
 > **Requires** Python 3.14+, [`uv`](https://docs.astral.sh/uv/), and a running Docker daemon.
 
-Or open the TUI empty and add challenges from the sidebar:
+## Web setup
 
-```bash
-uv run scripts/app.py
-```
+The web UI stores reusable configuration in the database:
 
-For a one-shot, single-challenge run without the UI:
-
-```bash
-uv run scripts/run.py challenges/lets-change
-```
-
-Use a specific agent configuration:
-
-```bash
-uv run scripts/run.py challenges/lets-change --agent-configuration configurations/codex.yaml
-uv run scripts/app.py --configurations-dir configurations
-```
+- **Credentials** hold provider API keys. Agent YAML can reference them with OmegaConf interpolation such as `${credential:openai}`.
+- **Models** name the model that should be injected into a run.
+- **Agents** store YAML like `configurations/codex.yaml`; the `class` field should be a fully qualified import path such as `catchy.codex.CodexAgent`.
+- **CTFs** group challenges and access rules.
+- **Challenges** include a markdown description, optional webhook settings, optional runner config, and a source archive upload or download URL.
 
 ## Anatomy of a challenge
 
-Challenges are directories with a `challenge.yaml` file and a `source/` folder. The YAML is loaded with OmegaConf, so environment interpolation and other OmegaConf features are available where useful.
+Challenges are stored in the web database with an uploaded or downloaded source archive. When a thread starts, Catchy extracts that archive and creates separate source, workspace, and metadata directories for the run.
 
 ```text
-challenges/lets-change/
-├── challenge.yaml      # id, description, optional webhook
-├── source/             # files mounted into the agent's container
-└── thread-.../         # one directory per run
-    ├── workspace/      # writable scratchpad mounted into the agent container
-    └── metadata/       # run metadata and artifacts kept separate from workspace
+media/
+└── threads/
+    └── thread-.../
+        ├── source/     # extracted challenge archive
+        ├── workspace/  # writable scratchpad mounted into the agent container
+        └── metadata/   # run metadata and artifacts kept separate from workspace
 ```
 
-```yaml
-# challenge.yaml
-id: lets-change
-description: "..."
-
-webhook: # optional
-  url: "https://discord.com/api/webhooks/..."
-  preferred_language: English
-```
-
-Every run starts a new thread directory:
-
-```text
-challenges/lets-change/thread-20260510-041230-123456/workspace/
-challenges/lets-change/thread-20260510-041230-123456/metadata/
-```
-
-The CLI prints the generated thread, workspace, and metadata paths before streaming output. In the TUI, add a challenge root, choose an agent, then select **Start thread**. While a thread is active, use the steer message box to queue guidance that will be sent to the agent between stream updates.
+While a thread is active, use the thread page to queue prompts, steering messages, or a stop request. Public threads can be shared from the web UI.
 
 ## Agent Configuration
 
@@ -101,28 +81,16 @@ model:
 
 The old shorthand `class: CodexAgent` still resolves to `catchy.codex.CodexAgent`, but new configs should use the full import path.
 
-## Keyboard
-
-| Key                       | Action                 |
-| ------------------------- | ---------------------- |
-| <kbd>s</kbd>              | Start selected thread  |
-| <kbd>space</kbd>          | Pause / resume         |
-| <kbd>r</kbd>              | Refresh the active log |
-| <kbd>q</kbd>              | Quit                   |
-| <kbd>↑</kbd> <kbd>↓</kbd> | Move between threads   |
-
 ## Project layout
 
 ```text
 catchy/
 ├── packages/
 │   ├── core/         # Challenge, Agent, Webhook protocols & models
-│   └── codex/        # CodexAgent — Codex App Server + Docker runtime
+│   ├── codex/        # CodexAgent — Codex App Server + Docker runtime
+│   └── web/          # Django web UI and thread orchestration
 ├── configurations/   # Agent YAML configurations
-├── scripts/
-│   ├── app.py        # The TUI shown above
-│   └── run.py        # Single-shot CLI runner
-├── challenges/       # Challenge YAML, source files, and workspaces
+├── challenges/       # Example challenge definitions and source files
 └── assets/           # Screenshots and images
 ```
 

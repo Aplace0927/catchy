@@ -84,31 +84,35 @@
           <button type="submit" class="thread-floating-btn">Stop</button>
         </form>
       </div>
-      <form class="steer-floating" id="steer-form" action="{% url 'ctf:thread_steer' thread.pk %}" method="post">
-        {% csrf_token %}
-        <textarea name="text" rows="1" required placeholder="message the thread…" id="steer-text"></textarea>
-        <button type="submit" class="steer-send" aria-label="Send" title="Send">↑</button>
-      </form>
+      {% if can_prompt_thread %}
+        <form class="steer-floating" id="steer-form" action="{% url 'ctf:thread_steer' thread.pk %}" method="post">
+          {% csrf_token %}
+          <textarea name="text" rows="1" required placeholder="message the thread…" id="steer-text"></textarea>
+          <button type="submit" class="steer-send" aria-label="Send" title="Send">↑</button>
+        </form>
+      {% endif %}
     </div>
-    <script>
-      (function () {
-        document.body.classList.add("has-steer");
-        const ta = document.getElementById("steer-text");
-        const form = document.getElementById("steer-form");
-        function autoGrow() {
-          ta.style.height = "auto";
-          ta.style.height = Math.min(ta.scrollHeight, 200) + "px";
-        }
-        ta.addEventListener("input", autoGrow);
-        ta.addEventListener("keydown", (e) => {
-          if (e.key === "Enter" && !e.shiftKey) {
-            e.preventDefault();
-            if (ta.value.trim()) form.submit();
+    {% if can_prompt_thread %}
+      <script>
+        (function () {
+          document.body.classList.add("has-steer");
+          const ta = document.getElementById("steer-text");
+          const form = document.getElementById("steer-form");
+          function autoGrow() {
+            ta.style.height = "auto";
+            ta.style.height = Math.min(ta.scrollHeight, 200) + "px";
           }
-        });
-        autoGrow();
-      })();
-    </script>
+          ta.addEventListener("input", autoGrow);
+          ta.addEventListener("keydown", (e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              if (ta.value.trim()) form.submit();
+            }
+          });
+          autoGrow();
+        })();
+      </script>
+    {% endif %}
   {% endif %}
 
   <section class="reveal">
@@ -134,6 +138,8 @@
       const statusNode = document.getElementById("status");
       const statusLabel = document.getElementById("status-label");
       const costNode = document.getElementById("cost");
+      const steerForm = document.getElementById("steer-form");
+      const promptableStatuses = new Set(["queued", "running", "waiting", "stopped", "completed"]);
 
       let countSeen = 0;
       let runningCostUsd = 0;
@@ -516,7 +522,14 @@
         );
         statusLabel.classList.add("status-" + (status || "pending"));
       }
+      function applyPromptAvailability(status) {
+        if (!steerForm) return;
+        const canPrompt = promptableStatuses.has(status || "");
+        steerForm.hidden = !canPrompt;
+        for (const el of steerForm.elements) el.disabled = !canPrompt;
+      }
       applyStatusClass(statusNode.textContent.trim());
+      applyPromptAvailability(statusNode.textContent.trim());
 
       const initial = JSON.parse(document.getElementById("events-data").textContent || "[]");
       for (const ev of initial) renderEvent(ev);
@@ -545,6 +558,7 @@
         const payload = JSON.parse(message.data);
         statusNode.textContent = payload.status;
         applyStatusClass(payload.status);
+        applyPromptAvailability(payload.status);
         sse.close();
       });
     })();

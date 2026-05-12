@@ -559,6 +559,18 @@ class PublicThreadAccessTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, 'id="steer-form"')
 
+    def test_failed_thread_detail_hides_steering_form_to_manager(self) -> None:
+        thread = self._create_thread("failed-detail", is_public=False)
+        thread.status = Thread.Status.FAILED
+        thread.error = "Codex turn failed"
+        thread.save(update_fields=["status", "error", "updated_at"])
+        self.client.force_login(self.user)
+
+        response = self.client.get(thread.get_absolute_url())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, 'id="steer-form"')
+
     def test_authenticated_user_can_publish_and_unpublish_thread(self) -> None:
         thread = self._create_thread("publishable", is_public=False)
         self.client.force_login(self.user)
@@ -604,6 +616,27 @@ class PublicThreadAccessTests(TestCase):
             SteeringMessage.Kind.PROMPT,
         )
         self.assertEqual(start_thread.call_args.args[0].pk, thread.pk)
+
+    def test_message_to_failed_thread_is_rejected(self) -> None:
+        thread = self._create_thread("failed-prompt", is_public=False)
+        thread.status = Thread.Status.FAILED
+        thread.error = "Codex turn failed"
+        thread.thread_root = "/tmp/catchy-existing-thread"
+        thread.save(update_fields=["status", "error", "thread_root", "updated_at"])
+        self.client.force_login(self.user)
+
+        with patch("catchy.web.ctf.views.start_thread") as start_thread:
+            response = self.client.post(
+                reverse("ctf:thread_steer", kwargs={"pk": thread.pk}),
+                {"text": "try again"},
+            )
+
+        thread.refresh_from_db()
+        self.assertRedirects(response, thread.get_absolute_url())
+        self.assertEqual(thread.status, Thread.Status.FAILED)
+        self.assertEqual(thread.error, "Codex turn failed")
+        self.assertFalse(thread.steering_messages.exists())
+        start_thread.assert_not_called()
 
     def test_steering_running_thread_does_not_restart_worker(self) -> None:
         thread = self._create_thread("steer-running", is_public=False)
@@ -729,6 +762,41 @@ class PublicThreadAccessTests(TestCase):
                 ("system", "thread.forked", f"Forked from thread #{thread.pk}"),
             ],
         )
+
+    def test_fork_thread_skips_codex_runtime_tmp_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source_root = Path(tmp) / "source"
+            source_metadata = source_root / "metadata"
+            source_session = source_metadata / ".codex" / "sessions" / "session.jsonl"
+            source_session.parent.mkdir(parents=True)
+            source_session.write_text("history\n")
+            inaccessible = source_metadata / ".codex" / "tmp" / "arg0"
+            inaccessible.mkdir(parents=True)
+            inaccessible.chmod(0)
+            target_root = Path(tmp) / "target"
+
+            thread = self._create_thread("fork-source", is_public=False)
+            thread.thread_root = str(source_root)
+            thread.metadata_path = str(source_metadata)
+            thread.save(update_fields=["thread_root", "metadata_path", "updated_at"])
+            self.client.force_login(self.user)
+
+            try:
+                with patch("catchy.web.ctf.services._thread_root") as thread_root:
+                    thread_root.return_value = target_root
+                    response = self.client.post(
+                        reverse("ctf:thread_fork", kwargs={"pk": thread.pk})
+                    )
+            finally:
+                inaccessible.chmod(0o700)
+
+            fork = Thread.objects.exclude(pk=thread.pk).get()
+            self.assertRedirects(response, fork.get_absolute_url())
+            self.assertTrue(
+                (target_root / "metadata" / ".codex" / "sessions" / "session.jsonl")
+                .exists()
+            )
+            self.assertFalse((target_root / "metadata" / ".codex" / "tmp").exists())
 
     def test_thread_detail_includes_cumulative_token_count_cost(self) -> None:
         thread = self._create_thread("costed", is_public=True)

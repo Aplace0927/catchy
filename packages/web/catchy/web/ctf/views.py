@@ -414,6 +414,13 @@ def thread_detail(request: HttpRequest, pk: int) -> HttpResponse:
             return redirect_to_login(request.get_full_path())
         raise PermissionDenied
     can_manage_thread = thread.ctf.can_view(request.user)
+    promptable_statuses = {
+        Thread.Status.QUEUED,
+        Thread.Status.RUNNING,
+        Thread.Status.WAITING,
+        Thread.Status.STOPPED,
+        Thread.Status.COMPLETED,
+    }
     events = list(thread.events.all()[:2000])
     return render(
         request,
@@ -426,6 +433,8 @@ def thread_detail(request: HttpRequest, pk: int) -> HttpResponse:
                 for event in events
             ],
             "can_manage_thread": can_manage_thread,
+            "can_prompt_thread": can_manage_thread
+            and thread.status in promptable_statuses,
         },
     )
 
@@ -463,7 +472,6 @@ def thread_steer(request: HttpRequest, pk: int) -> HttpResponse:
         Thread.Status.WAITING,
         Thread.Status.STOPPED,
         Thread.Status.COMPLETED,
-        Thread.Status.FAILED,
     }
     if thread.status in active_statuses:
         kind = SteeringMessage.Kind.STEER

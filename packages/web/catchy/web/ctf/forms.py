@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 from urllib.parse import urlparse
 
@@ -30,7 +31,42 @@ class CredentialForm(forms.ModelForm):
             "organization_id",
             "allowed_groups",
         ]
-        widgets = {"api_key": forms.PasswordInput(render_value=True)}
+        labels = {
+            "api_key": "Secret",
+            "organization_id": "Organization ID",
+        }
+        help_texts = {
+            "api_key": "API key, OAuth token, or raw Codex auth.json depending on the selected kind.",
+            "base_url": "Optional override for API-compatible endpoints.",
+            "organization_id": "Only used by OpenAI API key credentials.",
+        }
+        widgets = {"api_key": forms.PasswordInput(render_value=False)}
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        if self.instance.pk:
+            self.fields["api_key"].required = False
+            self.fields["api_key"].initial = ""
+            self.fields["api_key"].help_text = (
+                "Leave blank to keep the current secret. Enter a new API key, "
+                "OAuth token, or raw Codex auth.json to replace it."
+            )
+
+    def clean_api_key(self) -> str:
+        value = self.cleaned_data.get("api_key", "")
+        if not value and self.instance.pk:
+            value = self.instance.api_key
+        kind = self.cleaned_data.get("kind")
+        if kind != Credential.Kind.CODEX_AUTH_JSON:
+            return value
+
+        try:
+            payload = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise forms.ValidationError("Enter valid Codex auth.json.") from exc
+        if not isinstance(payload, dict):
+            raise forms.ValidationError("Codex auth.json must contain a JSON object.")
+        return value
 
 
 class ModelConfigurationForm(forms.ModelForm):

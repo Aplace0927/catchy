@@ -72,7 +72,7 @@ class CredentialAgentPermissionTests(TestCase):
                 "slug": "openai-prod",
                 "kind": Credential.Kind.OPENAI,
                 "api_key": "test-key",
-                "base_url": "https://api.openai.com/v1",
+                "base_url": "",
                 "organization_id": "",
             }
         )
@@ -92,6 +92,83 @@ class CredentialAgentPermissionTests(TestCase):
         )
 
         self.assertTrue(form.is_valid(), form.errors)
+
+    def test_codex_auth_json_credential_requires_json_object(self) -> None:
+        form = CredentialForm(
+            {
+                "name": "Codex Login",
+                "slug": "codex-login",
+                "kind": Credential.Kind.CODEX_AUTH_JSON,
+                "api_key": "not-json",
+                "base_url": "",
+                "organization_id": "",
+            }
+        )
+
+        self.assertFalse(form.is_valid())
+        self.assertIn("api_key", form.errors)
+
+    def test_credential_update_form_does_not_expose_secret(self) -> None:
+        self.client.force_login(self.allowed_user)
+
+        response = self.client.get(
+            reverse("ctf:credential_update", kwargs={"slug": self.credential.slug})
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Edit credential")
+        self.assertNotContains(response, "top-secret")
+
+    def test_credential_update_blank_secret_keeps_existing_value(self) -> None:
+        self.client.force_login(self.allowed_user)
+
+        response = self.client.post(
+            reverse("ctf:credential_update", kwargs={"slug": self.credential.slug}),
+            {
+                "name": "OpenAI Updated",
+                "slug": "api-token",
+                "kind": Credential.Kind.OPENAI,
+                "api_key": "",
+                "base_url": "",
+                "organization_id": "org_updated",
+                "allowed_groups": [str(self.allowed_group.pk)],
+            },
+        )
+
+        self.assertRedirects(response, reverse("ctf:credential_list"))
+        self.credential.refresh_from_db()
+        self.assertEqual(self.credential.name, "OpenAI Updated")
+        self.assertEqual(self.credential.api_key, "top-secret")
+        self.assertEqual(self.credential.organization_id, "org_updated")
+
+    def test_credential_update_replaces_secret_when_provided(self) -> None:
+        self.client.force_login(self.allowed_user)
+
+        response = self.client.post(
+            reverse("ctf:credential_update", kwargs={"slug": self.credential.slug}),
+            {
+                "name": "OpenAI Token",
+                "slug": "api-token",
+                "kind": Credential.Kind.OPENAI,
+                "api_key": "new-secret",
+                "base_url": "",
+                "organization_id": "",
+                "allowed_groups": [str(self.allowed_group.pk)],
+            },
+        )
+
+        self.assertRedirects(response, reverse("ctf:credential_list"))
+        self.credential.refresh_from_db()
+        self.assertEqual(self.credential.api_key, "new-secret")
+
+    def test_credential_update_rejects_disallowed_user(self) -> None:
+        self.client.force_login(self.denied_user)
+
+        response = self.client.get(
+            reverse("ctf:credential_update", kwargs={"slug": self.credential.slug})
+        )
+
+        self.assertEqual(response.status_code, 403)
 
     def test_model_name_accepts_non_slug_text(self) -> None:
         form = ModelConfigurationForm(
@@ -160,11 +237,12 @@ class CredentialAgentPermissionTests(TestCase):
             user=self.allowed_user,
         )
 
-        self.assertEqual(data["model"]["provider"], "openai")
         self.assertEqual(data["model"]["name"], "gpt-5.5")
-        self.assertEqual(data["model"]["api_key"], "top-secret")
-        self.assertEqual(data["model"]["base_url"], "https://example.test/v1")
-        self.assertEqual(data["model"]["organization_id"], "org_123")
+        self.assertNotIn("provider", data["model"])
+        self.assertNotIn("api_key", data["model"])
+        self.assertEqual(data["credential"]["api_key"], "top-secret")
+        self.assertEqual(data["credential"]["base_url"], "https://example.test/v1")
+        self.assertEqual(data["credential"]["organization_id"], "org_123")
 
     def test_build_agent_configuration_overlays_anthropic_credential(self) -> None:
         agent = AgentConfiguration.objects.create(
@@ -197,10 +275,70 @@ class CredentialAgentPermissionTests(TestCase):
             user=self.allowed_user,
         )
 
-        self.assertEqual(data["model"]["provider"], "anthropic")
         self.assertEqual(data["model"]["name"], "claude-sonnet-4-5")
-        self.assertEqual(data["model"]["api_key"], "anthropic-secret")
-        self.assertNotIn("base_url", data["model"])
+        self.assertNotIn("provider", data["model"])
+        self.assertNotIn("api_key", data["model"])
+        self.assertEqual(data["credential"]["api_key"], "anthropic-secret")
+        self.assertNotIn("base_url", data["credential"])
+
+    def test_build_agent_configuration_overlays_codex_auth_json(self) -> None:
+        agent = AgentConfiguration.objects.create(
+            name="Codex",
+            slug="codex",
+            yaml="id: codex\nclass: catchy.codex.CodexAgent\nmodel:\n  name: old\n",
+        )
+        model = ModelConfiguration.objects.create(name="gpt-5.5", slug="gpt-55")
+        credential = Credential.objects.create(
+            name="Codex Login",
+            slug="codex-login",
+            kind=Credential.Kind.CODEX_AUTH_JSON,
+            api_key='{"auth_mode": "chatgpt"}',
+            base_url="https://example.test/v1",
+        )
+        credential.allowed_groups.add(self.allowed_group)
+
+        data = services.build_agent_configuration(
+            agent,
+            model_configuration=model,
+            credential=credential,
+            user=self.allowed_user,
+        )
+
+        self.assertEqual(data["model"]["name"], "gpt-5.5")
+        self.assertEqual(data["credential"]["json_string"], '{"auth_mode": "chatgpt"}')
+        self.assertEqual(data["credential"]["base_url"], "https://example.test/v1")
+
+    def test_build_agent_configuration_overlays_claude_oauth_token(self) -> None:
+        agent = AgentConfiguration.objects.create(
+            name="Claude Code",
+            slug="claude-code",
+            yaml=(
+                "id: claude-code\n"
+                "class: catchy.claude_code.ClaudeCodeAgent\n"
+                "model:\n"
+                "  name: old\n"
+            ),
+        )
+        model = ModelConfiguration.objects.create(
+            name="claude-sonnet-4-5", slug="claude-sonnet-45"
+        )
+        credential = Credential.objects.create(
+            name="Claude Login",
+            slug="claude-login",
+            kind=Credential.Kind.CLAUDE_OAUTH_TOKEN,
+            api_key="oauth-secret",
+        )
+        credential.allowed_groups.add(self.allowed_group)
+
+        data = services.build_agent_configuration(
+            agent,
+            model_configuration=model,
+            credential=credential,
+            user=self.allowed_user,
+        )
+
+        self.assertEqual(data["model"]["name"], "claude-sonnet-4-5")
+        self.assertEqual(data["credential"], {"token": "oauth-secret"})
 
     def test_thread_create_rejects_credential_user_cannot_view(self) -> None:
         ctf = Ctf.objects.create(title="Study", slug="study")

@@ -314,12 +314,32 @@ def _deep_merge(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
     return merged
 
 
-class _Model(BaseModel):
-    provider: Literal["openai"] = "openai"
-    name: str = "gpt-5.5"
+class _OpenAICompatibleApiKeyCredential(BaseModel):
     api_key: str
     base_url: str | None = None
     organization_id: str | None = None
+
+
+class _CodexAuthJsonCredential(BaseModel):
+    json_string: str
+    base_url: str | None = None
+
+    @field_validator("json_string")
+    @classmethod
+    def _validate_json_string(cls, value: str) -> str:
+        try:
+            payload = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError("json_string must contain valid JSON") from exc
+
+        if not isinstance(payload, dict):
+            raise ValueError("json_string must contain a JSON object")
+
+        return value
+
+
+class _Model(BaseModel):
+    name: str = "gpt-5.5"
 
 
 class _Directory(BaseModel):
@@ -332,7 +352,7 @@ class _Container(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     provider: Literal["docker"] = "docker"
-    socket: str = "/var/run/docker.sock"
+    socket: str = "unix:///var/run/docker.sock"
     image: Image
 
     @field_validator("image", mode="before")
@@ -341,10 +361,10 @@ class _Container(BaseModel):
         if isinstance(value, Image):
             return value
 
-        socket = info.data.get("socket", "/var/run/docker.sock")
+        socket = info.data.get("socket", "unix:///var/run/docker.sock")
         client: DockerClient | None = None
         try:
-            client = DockerClient(base_url=f"unix://{socket}")
+            client = DockerClient(base_url=socket)
             try:
                 return client.images.get(value)
             except DockerException:
@@ -370,6 +390,7 @@ class _PromptTemplate(BaseModel):
 class Configuration(BaseModel):
     id: str
     model: _Model
+    credential: _OpenAICompatibleApiKeyCredential | _CodexAuthJsonCredential
     directory: _Directory
     container: _Container
     prompt: _PromptTemplate
@@ -380,19 +401,27 @@ class CodexAgent(Agent):
 
     @staticmethod
     def from_configuration(configuration: Configuration) -> CodexAgent:
+        match configuration.credential:
+            case _OpenAICompatibleApiKeyCredential() as credential:
+                auth_json_string = json.dumps(
+                    {
+                        "auth_mode": "apikey",
+                        "OPENAI_API_KEY": credential.api_key,
+                    }
+                )
+            case _CodexAuthJsonCredential() as credential:
+                auth_json_string = credential.json_string
+
         return CodexAgent(
             id=configuration.id,
             model_name=configuration.model.name,
-            model_api_key=configuration.model.api_key,
-            model_base_url=configuration.model.base_url,
-            model_organization_id=configuration.model.organization_id,
+            model_base_url=configuration.credential.base_url,
+            auth_json_string=auth_json_string,
             container_challenge_directory=configuration.directory.challenge,
             container_workspace_directory=configuration.directory.workspace,
             container_metadata_directory=configuration.directory.metadata,
             docker_image=configuration.container.image,
-            docker_client=DockerClient(
-                base_url=f"unix://{configuration.container.socket}"
-            ),
+            docker_client=DockerClient(base_url=configuration.container.socket),
             user_prompt_template=configuration.prompt.user,
             docker_socket=configuration.container.socket,
         )
@@ -401,23 +430,20 @@ class CodexAgent(Agent):
         self,
         id: str,
         model_name: str,
-        model_api_key: str,
+        model_base_url: str | None,
+        auth_json_string: str,
         container_challenge_directory: str,
         container_workspace_directory: str,
         container_metadata_directory: str,
         docker_image: Image,
         docker_client: DockerClient,
         user_prompt_template: str,
-        model_base_url: str | None = None,
-        model_organization_id: str | None = None,
         docker_socket: str = "/var/run/docker.sock",
-        # model_config: JsonObject = {},
     ):
         self._id = id
         self._model_name = model_name
-        self._model_api_key = model_api_key
         self._model_base_url = model_base_url
-        self._model_organization_id = model_organization_id
+        self._auth_json_string = auth_json_string
         self._container_challenge_directory = container_challenge_directory
         self._container_workspace_directory = container_workspace_directory
         self._container_metadata_directory = container_metadata_directory
@@ -457,9 +483,10 @@ class CodexAgent(Agent):
             id=self._id,
             model=_Model(
                 name=self._model_name,
-                api_key=self._model_api_key,
+            ),
+            credential=_CodexAuthJsonCredential(
+                json_string=self._auth_json_string,
                 base_url=self._model_base_url,
-                organization_id=self._model_organization_id,
             ),
             directory=_Directory(
                 challenge=self._container_challenge_directory,
@@ -691,16 +718,12 @@ class CodexAgent(Agent):
         runtime_config = self._read_container_toml(
             container, f"{codex_home}/config.toml"
         )
-        auth_payload = {"auth_mode": "apikey", "OPENAI_API_KEY": self._model_api_key}
-        if self._model_organization_id:
-            auth_payload["OPENAI_ORGANIZATION"] = self._model_organization_id
-            auth_payload["OPENAI_ORG_ID"] = self._model_organization_id
 
         self._put_container_files(
             container,
             codex_home,
             {
-                "auth.json": json.dumps(auth_payload),
+                "auth.json": self._auth_json_string,
                 "config.toml": tomli_w.dumps(self._build_codex_config(runtime_config)),
             },
         )

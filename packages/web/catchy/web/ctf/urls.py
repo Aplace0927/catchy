@@ -8,6 +8,11 @@ urlpatterns = [
     path("", views.index, name="index"),
     path("credentials/", views.credential_list, name="credential_list"),
     path("credentials/new/", views.credential_create, name="credential_create"),
+    path(
+        "credentials/<slug:slug>/edit/",
+        views.credential_update,
+        name="credential_update",
+    ),
     path("models/", views.model_list, name="model_list"),
     path("models/new/", views.model_create, name="model_create"),
     path("models/<slug:slug>/edit/", views.model_update, name="model_update"),

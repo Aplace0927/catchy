@@ -271,35 +271,60 @@ def build_agent_configuration(
         raise PermissionDenied("model configuration is not accessible")
     if user is not None and not credential.can_view(user):
         raise PermissionDenied("credential is not accessible")
-    provider = _provider_for_credential(credential)
-
     existing_model = data.get("model", {})
-    model_data = dict(existing_model) if isinstance(existing_model, dict) else {}
-    model_data.update(
-        {
-            "provider": provider,
-            "name": model_configuration.name,
-            "api_key": credential.api_key,
-        }
+    model_data = (
+        dict(cast(dict[str, Any], existing_model))
+        if isinstance(existing_model, dict)
+        else {}
     )
-    if credential.base_url:
-        model_data["base_url"] = credential.base_url
-    else:
-        model_data.pop("base_url", None)
-    if credential.organization_id:
-        model_data["organization_id"] = credential.organization_id
-    else:
-        model_data.pop("organization_id", None)
+    model_data["name"] = model_configuration.name
+    for stale_key in ("provider", "api_key", "base_url", "organization_id"):
+        model_data.pop(stale_key, None)
+
     data["model"] = model_data
+    data["credential"] = _credential_configuration_for_agent(data, credential)
     return data
 
 
-def _provider_for_credential(credential: Credential) -> str:
+def _credential_configuration_for_agent(
+    data: dict[str, Any], credential: Credential
+) -> dict[str, str]:
+    class_path = _agent_class_path(data)
+    if class_path == "catchy.codex.CodexAgent" and credential.kind not in {
+        Credential.Kind.CODEX_AUTH_JSON,
+        Credential.Kind.OPENAI,
+    }:
+        raise ValueError(
+            f"credential kind is not compatible with Codex: {credential.kind}"
+        )
+    if class_path == "catchy.claude_code.ClaudeCodeAgent" and credential.kind not in {
+        Credential.Kind.ANTHROPIC,
+        Credential.Kind.CLAUDE_OAUTH_TOKEN,
+    }:
+        raise ValueError(
+            f"credential kind is not compatible with Claude Code: {credential.kind}"
+        )
+
     match credential.kind:
         case Credential.Kind.OPENAI:
-            return "openai"
+            data = {"api_key": credential.api_key}
+            if credential.base_url:
+                data["base_url"] = credential.base_url
+            if credential.organization_id:
+                data["organization_id"] = credential.organization_id
+            return data
+        case Credential.Kind.CODEX_AUTH_JSON:
+            data = {"json_string": credential.api_key}
+            if credential.base_url:
+                data["base_url"] = credential.base_url
+            return data
         case Credential.Kind.ANTHROPIC:
-            return "anthropic"
+            data = {"api_key": credential.api_key}
+            if credential.base_url:
+                data["base_url"] = credential.base_url
+            return data
+        case Credential.Kind.CLAUDE_OAUTH_TOKEN:
+            return {"token": credential.api_key}
         case _:
             raise ValueError(f"unsupported credential kind: {credential.kind}")
 

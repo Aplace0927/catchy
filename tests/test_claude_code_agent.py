@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from catchy.claude_code import ClaudeCodeAgent
-from catchy.core.agents.models import Chunk, ItemCompleted
+from catchy.core.agents.models import Chunk, ItemCompleted, Nop
 from claude_agent_sdk import StreamEvent
 
 
@@ -20,7 +20,7 @@ def test_claude_home_configuration_is_copied_into_container() -> None:
         {"/metadata/.claude/settings.json": '{"permissions": {"deny": []}}'}
     )
 
-    agent._configure_claude_home(  # pyright: ignore[reportPrivateUsage]
+    agent._configure_claude_configuration_directory(  # pyright: ignore[reportPrivateUsage]
         container, "/metadata/.claude"
     )
 
@@ -41,7 +41,7 @@ def test_claude_cli_wrapper_execs_claude_inside_container(tmp_path: Path) -> Non
     wrapper = agent._write_cli_wrapper(  # pyright: ignore[reportPrivateUsage]
         metadata_directory=tmp_path,
         container_id="container-123",
-        claude_config_dir="/metadata/.claude",
+        container_claude_configuration_directory="/metadata/.claude",
         container_user="1001:1001",
     )
 
@@ -51,7 +51,7 @@ def test_claude_cli_wrapper_execs_claude_inside_container(tmp_path: Path) -> Non
     assert "--workdir /workspace" in script
     assert "--env ANTHROPIC_API_KEY" in script
     assert "--env ANTHROPIC_BASE_URL" in script
-    assert "container-123 claude \"$@\"" in script
+    assert 'container-123 claude "$@"' in script
 
 
 def test_claude_stream_event_yields_text_delta() -> None:
@@ -118,6 +118,156 @@ def test_claude_stream_event_yields_tool_start_and_input_delta() -> None:
         text='{"file_path": "README.md"}',
     )
     assert isinstance(stop, ItemCompleted)
+
+
+def test_claude_stream_event_accumulates_tool_input_on_stop() -> None:
+    agent = object.__new__(ClaudeCodeAgent)
+
+    start_events = agent._events_from_stream_event(  # pyright: ignore[reportPrivateUsage]
+        StreamEvent(
+            uuid="event-1",
+            session_id="session-1",
+            event={
+                "type": "content_block_start",
+                "index": 1,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": "toolu_123",
+                    "name": "Read",
+                    "input": {},
+                },
+            },
+        )
+    )
+    first_delta = agent._events_from_stream_event(  # pyright: ignore[reportPrivateUsage]
+        StreamEvent(
+            uuid="event-2",
+            session_id="session-1",
+            event={
+                "type": "content_block_delta",
+                "index": 1,
+                "delta": {"type": "input_json_delta", "partial_json": '{"file_'},
+            },
+        )
+    )
+    second_delta = agent._events_from_stream_event(  # pyright: ignore[reportPrivateUsage]
+        StreamEvent(
+            uuid="event-3",
+            session_id="session-1",
+            event={
+                "type": "content_block_delta",
+                "index": 1,
+                "delta": {
+                    "type": "input_json_delta",
+                    "partial_json": 'path": "README.md"}',
+                },
+            },
+        )
+    )
+    stop_events = agent._events_from_stream_event(  # pyright: ignore[reportPrivateUsage]
+        StreamEvent(
+            uuid="event-4",
+            session_id="session-1",
+            event={"type": "content_block_stop", "index": 1},
+        )
+    )
+
+    assert start_events == [
+        Chunk(tag="tool_use", text='{"id": "toolu_123", "input": {}, "name": "Read"}')
+    ]
+    assert first_delta == [Chunk(tag="tool_input", text='{"file_')]
+    assert second_delta == [Chunk(tag="tool_input", text='path": "README.md"}')]
+    assert stop_events == [
+        Chunk(tag="tool_input", text='{"file_path": "README.md"}'),
+        ItemCompleted(),
+    ]
+
+
+def test_claude_stream_event_handles_ping_and_signature_delta() -> None:
+    agent = object.__new__(ClaudeCodeAgent)
+
+    ping = agent._event_from_stream_event(  # pyright: ignore[reportPrivateUsage]
+        StreamEvent(
+            uuid="event-1",
+            session_id="session-1",
+            event={"type": "ping"},
+        )
+    )
+    start = agent._events_from_stream_event(  # pyright: ignore[reportPrivateUsage]
+        StreamEvent(
+            uuid="event-2",
+            session_id="session-1",
+            event={
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "thinking", "thinking": "", "signature": ""},
+            },
+        )
+    )
+    signature = agent._event_from_stream_event(  # pyright: ignore[reportPrivateUsage]
+        StreamEvent(
+            uuid="event-3",
+            session_id="session-1",
+            event={
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "signature_delta", "signature": "sig_123"},
+            },
+        )
+    )
+
+    assert isinstance(ping, Nop)
+    assert start == []
+    assert isinstance(signature, Nop)
+
+
+def test_claude_stream_event_yields_server_tool_use() -> None:
+    agent = object.__new__(ClaudeCodeAgent)
+
+    event = agent._event_from_stream_event(  # pyright: ignore[reportPrivateUsage]
+        StreamEvent(
+            uuid="event-1",
+            session_id="session-1",
+            event={
+                "type": "content_block_start",
+                "index": 1,
+                "content_block": {
+                    "type": "server_tool_use",
+                    "id": "srvtoolu_123",
+                    "name": "web_search",
+                    "input": {},
+                },
+            },
+        )
+    )
+
+    assert event == Chunk(
+        tag="tool_use",
+        text='{"id": "srvtoolu_123", "input": {}, "name": "web_search"}',
+    )
+
+
+def test_claude_stream_event_raises_on_error_event() -> None:
+    agent = object.__new__(ClaudeCodeAgent)
+
+    try:
+        agent._event_from_stream_event(  # pyright: ignore[reportPrivateUsage]
+            StreamEvent(
+                uuid="event-1",
+                session_id="session-1",
+                event={
+                    "type": "error",
+                    "error": {
+                        "type": "overloaded_error",
+                        "message": "Overloaded",
+                    },
+                },
+            )
+        )
+    except RuntimeError as error:
+        assert str(error) == "Claude Code stream error: overloaded_error: Overloaded"
+    else:
+        raise AssertionError("expected stream error to raise")
 
 
 class _ExecResult:

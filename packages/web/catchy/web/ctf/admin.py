@@ -16,7 +16,7 @@ from .models import (
 @admin.register(Credential)
 class CredentialAdmin(admin.ModelAdmin):
     list_display = ["name", "slug", "kind", "base_url", "created_at"]
-    search_fields = ["name", "slug", "base_url", "organization_id"]
+    search_fields = ["name", "slug", "kind", "base_url", "organization_id"]
     filter_horizontal = ["allowed_groups"]
 
 

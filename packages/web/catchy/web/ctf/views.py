@@ -115,6 +115,27 @@ def credential_create(request: HttpRequest) -> HttpResponse:
 
 
 @login_required
+def credential_update(request: HttpRequest, slug: str) -> HttpResponse:
+    credential = get_object_or_404(
+        Credential.objects.prefetch_related("allowed_groups"),
+        slug=slug,
+    )
+    if not credential.can_view(request.user):
+        raise PermissionDenied
+
+    form = CredentialForm(request.POST or None, instance=credential)
+    if request.method == "POST" and form.is_valid():
+        form.save()
+        messages.success(request, "Credential updated.")
+        return redirect("ctf:credential_list")
+    return render(
+        request,
+        "ctf/form.html",
+        {"form": form, "title": f"Edit credential: {credential.name}"},
+    )
+
+
+@login_required
 def model_list(request: HttpRequest) -> HttpResponse:
     models = [
         model

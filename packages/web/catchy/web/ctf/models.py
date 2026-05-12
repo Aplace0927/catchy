@@ -82,14 +82,16 @@ class TimeStampedModel(models.Model):
 
 class Credential(TimeStampedModel):
     class Kind(models.TextChoices):
-        ANTHROPIC = "anthropic", "Anthropic"
-        OPENAI = "openai", "OpenAI"
+        ANTHROPIC = "anthropic", "Anthropic API key"
+        CLAUDE_OAUTH_TOKEN = "claude_oauth_token", "Claude Code OAuth token"
+        CODEX_AUTH_JSON = "codex_auth_json", "Codex auth.json"
+        OPENAI = "openai", "OpenAI API key"
 
     name = models.CharField(max_length=200)
     slug = models.SlugField(max_length=200, unique=True)
     kind = models.CharField(max_length=30, choices=Kind.choices, default=Kind.OPENAI)
     api_key = models.TextField()
-    base_url = models.URLField(blank=True, default="https://api.openai.com/v1")
+    base_url = models.URLField(blank=True, default="")
     organization_id = models.CharField(max_length=200, blank=True)
     allowed_groups = models.ManyToManyField(
         Group, blank=True, related_name="credentials"

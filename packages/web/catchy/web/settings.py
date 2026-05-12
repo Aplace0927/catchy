@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from urllib.parse import parse_qsl, unquote, urlparse
 
 from django.core.exceptions import ImproperlyConfigured
 
@@ -21,6 +22,91 @@ def _list_env(name: str, default: list[str] | None = None) -> list[str]:
 def _path_env(name: str, default: Path) -> Path:
     value = os.environ.get(name)
     return Path(value) if value else default
+
+
+def _sqlite_database_config() -> dict[str, object]:
+    return {
+        "ENGINE": "django.db.backends.sqlite3",
+        "NAME": _path_env("CATCHY_SQLITE_PATH", DATA_DIR / "db.sqlite3"),
+        "OPTIONS": {
+            "timeout": 30,
+            "transaction_mode": "IMMEDIATE",
+            "init_command": "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=30000",
+        },
+    }
+
+
+def _database_from_url(database_url: str) -> dict[str, object]:
+    parsed = urlparse(database_url)
+    engine_by_scheme = {
+        "postgres": "django.db.backends.postgresql",
+        "postgresql": "django.db.backends.postgresql",
+    }
+    engine = engine_by_scheme.get(parsed.scheme)
+    if engine is None:
+        raise ImproperlyConfigured(
+            f"Unsupported DATABASE_URL scheme: {parsed.scheme or '<empty>'}"
+        )
+
+    name = unquote(parsed.path.removeprefix("/"))
+    if not name:
+        raise ImproperlyConfigured("DATABASE_URL must include a database name")
+
+    config: dict[str, object] = {
+        "ENGINE": engine,
+        "NAME": name,
+    }
+    if parsed.username:
+        config["USER"] = unquote(parsed.username)
+    if parsed.password:
+        config["PASSWORD"] = unquote(parsed.password)
+    if parsed.hostname:
+        config["HOST"] = parsed.hostname
+    if parsed.port:
+        config["PORT"] = parsed.port
+
+    options = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    if options:
+        config["OPTIONS"] = options
+
+    return config
+
+
+def _postgres_database_config() -> dict[str, object]:
+    name = os.environ.get("CATCHY_POSTGRES_DB")
+    if not name:
+        raise ImproperlyConfigured("CATCHY_POSTGRES_DB must be set for PostgreSQL")
+
+    config: dict[str, object] = {
+        "ENGINE": "django.db.backends.postgresql",
+        "NAME": name,
+        "HOST": os.environ.get("CATCHY_POSTGRES_HOST", "localhost"),
+        "PORT": int(os.environ.get("CATCHY_POSTGRES_PORT", "5432")),
+    }
+    if user := os.environ.get("CATCHY_POSTGRES_USER"):
+        config["USER"] = user
+    if password := os.environ.get("CATCHY_POSTGRES_PASSWORD"):
+        config["PASSWORD"] = password
+    if sslmode := os.environ.get("CATCHY_POSTGRES_SSLMODE"):
+        config["OPTIONS"] = {"sslmode": sslmode}
+
+    return config
+
+
+def _database_config() -> dict[str, object]:
+    database_url = os.environ.get("DATABASE_URL") or os.environ.get(
+        "CATCHY_DATABASE_URL"
+    )
+    if database_url:
+        return _database_from_url(database_url)
+
+    database_engine = os.environ.get("CATCHY_DATABASE_ENGINE")
+    if database_engine in {"postgres", "postgresql"}:
+        return _postgres_database_config()
+    if database_engine not in {None, "", "sqlite", "sqlite3"}:
+        raise ImproperlyConfigured(f"Unsupported CATCHY_DATABASE_ENGINE: {database_engine}")
+
+    return _sqlite_database_config()
 
 
 BASE_DIR = Path(__file__).resolve().parents[2]
@@ -76,17 +162,7 @@ TEMPLATES = [
 WSGI_APPLICATION = "catchy.web.wsgi.application"
 ASGI_APPLICATION = "catchy.web.asgi.application"
 
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.sqlite3",
-        "NAME": _path_env("CATCHY_SQLITE_PATH", DATA_DIR / "db.sqlite3"),
-        "OPTIONS": {
-            "timeout": 30,
-            "transaction_mode": "IMMEDIATE",
-            "init_command": "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=30000",
-        },
-    }
-}
+DATABASES = {"default": _database_config()}
 
 AUTH_PASSWORD_VALIDATORS = [
     {

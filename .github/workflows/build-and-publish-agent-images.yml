@@ -18,8 +18,70 @@ env:
   IMAGE_NAME: ghcr.io/betarixm/catchy-codex
   CLAUDE_CODE_IMAGE_NAME: ghcr.io/betarixm/catchy-claude-code
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      ubuntu: ${{ steps.filter.outputs.ubuntu }}
+      codex: ${{ steps.filter.outputs.codex }}
+      claude_code: ${{ steps.filter.outputs.claude_code }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: filter
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            ubuntu=true
+            codex=true
+            claude_code=true
+          else
+            if [[ "$BEFORE" =~ ^0+$ ]]; then
+              BEFORE="$(git rev-list --max-parents=0 HEAD)"
+            fi
+
+            changed_files="$(git diff --name-only "$BEFORE" "$AFTER")"
+            printf '%s\n' "$changed_files"
+
+            ubuntu=false
+            codex=false
+            claude_code=false
+
+            if grep -Fxq "containers/ubuntu/Dockerfile" <<<"$changed_files"; then
+              ubuntu=true
+              codex=true
+              claude_code=true
+            fi
+            if grep -Fxq "containers/codex/Dockerfile" <<<"$changed_files"; then
+              codex=true
+            fi
+            if grep -Fxq "containers/codex/config.toml" <<<"$changed_files"; then
+              codex=true
+            fi
+            if grep -Fxq "containers/claude-code/Dockerfile" <<<"$changed_files"; then
+              claude_code=true
+            fi
+            if grep -Fxq "containers/claude-code/settings.json" <<<"$changed_files"; then
+              claude_code=true
+            fi
+          fi
+
+          {
+            echo "ubuntu=$ubuntu"
+            echo "codex=$codex"
+            echo "claude_code=$claude_code"
+          } >> "$GITHUB_OUTPUT"
+
   publish-ubuntu:
     runs-on: ubuntu-latest
+    needs: changes
+    if: ${{ needs.changes.outputs.ubuntu == 'true' }}
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
@@ -41,7 +103,10 @@ jobs:
 
   publish-codex:
     runs-on: ubuntu-latest
-    needs: publish-ubuntu
+    needs:
+      - changes
+      - publish-ubuntu
+    if: ${{ always() && needs.changes.outputs.codex == 'true' && (needs.publish-ubuntu.result == 'success' || needs.publish-ubuntu.result == 'skipped') }}
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
@@ -63,7 +128,10 @@ jobs:
 
   publish-claude-code:
     runs-on: ubuntu-latest
-    needs: publish-ubuntu
+    needs:
+      - changes
+      - publish-ubuntu
+    if: ${{ always() && needs.changes.outputs.claude_code == 'true' && (needs.publish-ubuntu.result == 'success' || needs.publish-ubuntu.result == 'skipped') }}
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3

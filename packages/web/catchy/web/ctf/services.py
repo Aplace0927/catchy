@@ -29,12 +29,7 @@ from catchy.core.challenge.models import Challenge as CoreChallenge
 from catchy.core.webhook.models import Webhook
 from django.conf import settings
 from django.core.exceptions import PermissionDenied
-from django.db import (
-    IntegrityError,
-    OperationalError,
-    close_old_connections,
-    transaction,
-)
+from django.db import transaction
 from django.db.models import Max
 from django.utils import timezone
 
@@ -48,14 +43,12 @@ from .models import (
     ThreadCostSnapshot,
 )
 
-_STREAM_EVENT_WRITE_ATTEMPTS = 6
-_STREAM_EVENT_WRITE_RETRY_DELAY_SECONDS = 0.05
 _CODEX_RUNTIME_METADATA_DIRS = frozenset({".tmp", "tmp"})
 
 
 def start_thread(thread: Thread) -> Any:
     worker = threading.Thread(
-        target=_run_thread_in_local_worker,
+        target=run_thread_sync,
         args=(thread.pk,),
         daemon=True,
         name=f"catchy-thread-{thread.pk}",
@@ -131,14 +124,6 @@ def _ignore_runtime_metadata(directory: str, names: list[str]) -> set[str]:
     if Path(directory).name != ".codex":
         return set()
     return set(_CODEX_RUNTIME_METADATA_DIRS.intersection(names))
-
-
-def _run_thread_in_local_worker(thread_id: int) -> None:
-    close_old_connections()
-    try:
-        run_thread_sync(thread_id)
-    finally:
-        close_old_connections()
 
 
 def run_thread_sync(thread_id: int) -> None:
@@ -536,50 +521,6 @@ def _record_event(
     raw: dict[str, Any] | None = None,
     dedupe_key: str | None = None,
 ) -> StreamEvent:
-    delay = _STREAM_EVENT_WRITE_RETRY_DELAY_SECONDS
-    for attempt in range(_STREAM_EVENT_WRITE_ATTEMPTS):
-        try:
-            return _record_event_once(
-                thread,
-                source=source,
-                kind=kind,
-                text=text,
-                raw=raw,
-                dedupe_key=dedupe_key,
-            )
-        except OperationalError as exc:
-            if (
-                not _is_database_locked(exc)
-                or attempt == _STREAM_EVENT_WRITE_ATTEMPTS - 1
-            ):
-                raise
-            close_old_connections()
-            time.sleep(delay)
-            delay *= 2
-        except IntegrityError:
-            if dedupe_key is not None:
-                event = StreamEvent.objects.filter(
-                    thread=thread,
-                    dedupe_key=dedupe_key,
-                ).first()
-                if event is not None:
-                    return event
-            if attempt == _STREAM_EVENT_WRITE_ATTEMPTS - 1:
-                raise
-            time.sleep(delay)
-            delay *= 2
-    raise RuntimeError("stream event write retry loop exited unexpectedly")
-
-
-def _record_event_once(
-    thread: Thread,
-    *,
-    source: str,
-    kind: str,
-    text: str,
-    raw: dict[str, Any] | None = None,
-    dedupe_key: str | None = None,
-) -> StreamEvent:
     with transaction.atomic():
         sequence = (
             StreamEvent.objects.filter(thread=thread).aggregate(Max("sequence"))[
@@ -601,11 +542,6 @@ def _record_event_once(
             },
         )
         return event
-
-
-def _is_database_locked(exc: OperationalError) -> bool:
-    message = str(exc).lower()
-    return "database is locked" in message or "database table is locked" in message
 
 
 def _agent_class_path(data: dict[str, Any]) -> str:

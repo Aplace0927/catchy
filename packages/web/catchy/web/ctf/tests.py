@@ -290,35 +290,6 @@ class StreamEventRecordingTests(TestCase):
             agent=self.agent,
         )
 
-    def test_record_event_retries_transient_sqlite_lock(self) -> None:
-        calls = 0
-        record_event_once = services._record_event_once
-
-        def flaky_record_event_once(*args: Any, **kwargs: Any) -> StreamEvent:
-            nonlocal calls
-            calls += 1
-            if calls == 1:
-                raise OperationalError("database is locked")
-            return record_event_once(*args, **kwargs)
-
-        with (
-            patch(
-                "catchy.web.ctf.services._record_event_once",
-                side_effect=flaky_record_event_once,
-            ),
-            patch("catchy.web.ctf.services.time.sleep"),
-        ):
-            event = services._record_event(
-                self.thread,
-                source="agent_stream",
-                kind="delta",
-                text="hello",
-            )
-
-        self.assertEqual(calls, 2)
-        self.assertEqual(event.sequence, 1)
-        self.assertEqual(event.text, "hello")
-
     def test_record_stream_event_persists_chunk_tag(self) -> None:
         services._record_stream_event(
             self.thread.pk,

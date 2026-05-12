@@ -300,6 +300,8 @@ class Thread(TimeStampedModel):
     class Status(models.TextChoices):
         QUEUED = "queued", "Queued"
         RUNNING = "running", "Running"
+        WAITING = "waiting", "Waiting"
+        STOPPED = "stopped", "Stopped"
         COMPLETED = "completed", "Completed"
         FAILED = "failed", "Failed"
 
@@ -393,6 +395,11 @@ class StreamEvent(TimeStampedModel):
 
 
 class SteeringMessage(TimeStampedModel):
+    class Kind(models.TextChoices):
+        STEER = "steer", "Steer"
+        PROMPT = "prompt", "Prompt"
+        STOP = "stop", "Stop"
+
     thread = models.ForeignKey(
         Thread, on_delete=models.CASCADE, related_name="steering_messages"
     )
@@ -403,7 +410,8 @@ class SteeringMessage(TimeStampedModel):
         on_delete=models.SET_NULL,
         related_name="created_steering_messages",
     )
-    text = models.TextField()
+    kind = models.CharField(max_length=20, choices=Kind.choices, default=Kind.STEER)
+    text = models.TextField(blank=True)
     delivered_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:

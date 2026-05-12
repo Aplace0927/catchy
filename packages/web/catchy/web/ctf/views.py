@@ -34,7 +34,7 @@ from .models import (
     StreamEvent,
     Thread,
 )
-from .services import build_agent_configuration, start_thread
+from .services import build_agent_configuration, fork_thread, start_thread
 
 
 class _ChallengeGroup(TypedDict):
@@ -455,22 +455,37 @@ def thread_steer(request: HttpRequest, pk: int) -> HttpResponse:
 
     text = request.POST.get("text", "").strip()
     if not text:
-        messages.error(request, "Steer message cannot be empty.")
+        messages.error(request, "Message cannot be empty.")
         return redirect(thread)
-    active_statuses = {Thread.Status.QUEUED, Thread.Status.RUNNING}
-    stopped_statuses = {Thread.Status.COMPLETED, Thread.Status.FAILED}
-    should_resume = thread.status in stopped_statuses
-    if thread.status not in active_statuses | stopped_statuses:
-        messages.error(request, "This thread cannot receive steer messages.")
+    active_statuses = {Thread.Status.RUNNING}
+    prompt_statuses = {
+        Thread.Status.QUEUED,
+        Thread.Status.WAITING,
+        Thread.Status.STOPPED,
+        Thread.Status.COMPLETED,
+        Thread.Status.FAILED,
+    }
+    if thread.status in active_statuses:
+        kind = SteeringMessage.Kind.STEER
+        should_resume = False
+    elif thread.status == Thread.Status.QUEUED:
+        kind = SteeringMessage.Kind.PROMPT
+        should_resume = False
+    elif thread.status in prompt_statuses:
+        kind = SteeringMessage.Kind.PROMPT
+        should_resume = True
+    else:
+        messages.error(request, "This thread cannot receive messages.")
         return redirect(thread)
 
     SteeringMessage.objects.create(
         thread=thread,
         created_by=request.user,
+        kind=kind,
         text=text,
     )
     if should_resume:
-        Thread.objects.filter(pk=thread.pk, status__in=stopped_statuses).update(
+        Thread.objects.filter(pk=thread.pk, status__in=prompt_statuses).update(
             status=Thread.Status.QUEUED,
             error="",
             updated_at=timezone.now(),
@@ -478,10 +493,75 @@ def thread_steer(request: HttpRequest, pk: int) -> HttpResponse:
         thread.status = Thread.Status.QUEUED
         thread.error = ""
         start_thread(thread)
-        messages.success(request, "Steer message queued; thread is resuming.")
+        messages.success(request, "Prompt queued; thread is resuming.")
     else:
         messages.success(request, "Steer message queued.")
     return redirect(thread)
+
+
+@login_required
+@require_POST
+def thread_stop(request: HttpRequest, pk: int) -> HttpResponse:
+    thread = get_object_or_404(Thread.objects.select_related("ctf"), pk=pk)
+    if not thread.ctf.can_view(request.user):
+        raise PermissionDenied
+
+    active_statuses = {Thread.Status.QUEUED, Thread.Status.RUNNING}
+    if thread.status in active_statuses:
+        SteeringMessage.objects.create(
+            thread=thread,
+            created_by=request.user,
+            kind=SteeringMessage.Kind.STOP,
+        )
+        messages.success(request, "Stop queued.")
+        return redirect(thread)
+
+    if thread.status in {
+        Thread.Status.WAITING,
+        Thread.Status.STOPPED,
+        Thread.Status.COMPLETED,
+        Thread.Status.FAILED,
+    }:
+        thread.status = Thread.Status.STOPPED
+        thread.save(update_fields=["status", "updated_at"])
+        StreamEvent.objects.create(
+            thread=thread,
+            sequence=(
+                StreamEvent.objects.filter(thread=thread)
+                .order_by("-sequence")
+                .values_list("sequence", flat=True)
+                .first()
+                or 0
+            )
+            + 1,
+            dedupe_key=f"user:stop:{timezone.now().timestamp()}",
+            source="user",
+            kind="stop",
+            text="",
+            raw={"user_id": request.user.pk},
+        )
+        messages.success(request, "Thread stopped.")
+        return redirect(thread)
+
+    messages.error(request, "This thread cannot be stopped.")
+    return redirect(thread)
+
+
+@login_required
+@require_POST
+def thread_fork(request: HttpRequest, pk: int) -> HttpResponse:
+    thread = get_object_or_404(
+        Thread.objects.select_related(
+            "ctf", "challenge", "agent", "model", "credential", "created_by"
+        ),
+        pk=pk,
+    )
+    if not thread.ctf.can_view(request.user):
+        raise PermissionDenied
+
+    fork = fork_thread(thread, user=request.user)
+    messages.success(request, "Thread forked.")
+    return redirect(fork)
 
 
 def thread_stream(request: HttpRequest, pk: int) -> HttpResponse:
@@ -515,7 +595,12 @@ def _event_stream(thread_id: int, last_sequence: int = 0) -> Iterator[str]:
         yield "event: cost\n"
         yield f"data: {json.dumps({'cost': thread.latest_cost}, ensure_ascii=False)}\n\n"
 
-        if thread.status in {Thread.Status.COMPLETED, Thread.Status.FAILED}:
+        if thread.status in {
+            Thread.Status.WAITING,
+            Thread.Status.STOPPED,
+            Thread.Status.COMPLETED,
+            Thread.Status.FAILED,
+        }:
             yield "event: status\n"
             yield f"data: {json.dumps({'status': thread.status, 'error': thread.error}, ensure_ascii=False)}\n\n"
             return

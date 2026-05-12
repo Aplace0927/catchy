@@ -73,11 +73,23 @@
   {% endif %}
 
   {% if can_manage_thread %}
-    <form class="steer-floating" id="steer-form" action="{% url 'ctf:thread_steer' thread.pk %}" method="post">
-      {% csrf_token %}
-      <textarea name="text" rows="1" required placeholder="steer the agent…" id="steer-text"></textarea>
-      <button type="submit" class="steer-send" aria-label="Send" title="Send">↑</button>
-    </form>
+    <div class="thread-floating">
+      <div class="thread-floating-actions">
+        <form action="{% url 'ctf:thread_fork' thread.pk %}" method="post">
+          {% csrf_token %}
+          <button type="submit" class="thread-floating-btn">Fork</button>
+        </form>
+        <form action="{% url 'ctf:thread_stop' thread.pk %}" method="post">
+          {% csrf_token %}
+          <button type="submit" class="thread-floating-btn">Stop</button>
+        </form>
+      </div>
+      <form class="steer-floating" id="steer-form" action="{% url 'ctf:thread_steer' thread.pk %}" method="post">
+        {% csrf_token %}
+        <textarea name="text" rows="1" required placeholder="message the thread…" id="steer-text"></textarea>
+        <button type="submit" class="steer-send" aria-label="Send" title="Send">↑</button>
+      </form>
+    </div>
     <script>
       (function () {
         document.body.classList.add("has-steer");
@@ -114,6 +126,7 @@
 {% block scripts %}
   <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.5/dist/purify.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/ansi_up@5.2.1/ansi_up.min.js"></script>
   <script>
     (function () {
       const timeline = document.getElementById("timeline");
@@ -134,10 +147,25 @@
       let currentAssistantEndTs = null;
       let currentAssistantBaseCostUsd = 0;
       let currentRail = null;
+      let currentObservationTerminal = null;
+      let currentObservationText = "";
+      let currentObservationScreen = null;
+      let currentObservationHeader = null;
 
       marked.setOptions({ breaks: true, gfm: true });
+      const ansi = window.AnsiUp ? new window.AnsiUp() : null;
       const renderMarkdown = (text) =>
         DOMPurify.sanitize(marked.parse(text || ""));
+      const escapeHtml = (text) =>
+        String(text || "").replace(/[&<>"']/g, (ch) => ({
+          "&": "&amp;",
+          "<": "&lt;",
+          ">": "&gt;",
+          '"': "&quot;",
+          "'": "&#39;",
+        })[ch]);
+      const renderAnsi = (text) =>
+        DOMPurify.sanitize(ansi ? ansi.ansi_to_html(text || "") : escapeHtml(text));
 
       function fmtTime(iso) {
         if (!iso) return "";
@@ -202,6 +230,22 @@
         return oneLine.length > 200 ? oneLine.slice(0, 200) + "…" : oneLine;
       }
 
+      function chunkTag(ev) {
+        if (ev.raw && typeof ev.raw === "object" && typeof ev.raw.tag === "string") {
+          return ev.raw.tag;
+        }
+        if (ev.kind === "delta") return "action";
+        return "";
+      }
+
+      function isAgentChunk(ev) {
+        return ev.source === "agent_stream" && (ev.kind === "chunk" || ev.kind === "delta");
+      }
+
+      function isItemTermination(ev) {
+        return ev.source === "agent_stream" && ev.kind === "item.terminated";
+      }
+
       function tokenStats(ev) {
         const raw = ev.raw;
         if (!raw || typeof raw !== "object") return { stats: null, costUsd: null };
@@ -253,6 +297,13 @@
         currentAssistantBaseCostUsd = runningCostUsd;
       }
 
+      function flushObservationTerminal() {
+        currentObservationTerminal = null;
+        currentObservationText = "";
+        currentObservationScreen = null;
+        currentObservationHeader = null;
+      }
+
       function flushRail() {
         currentRail = null;
       }
@@ -270,6 +321,7 @@
         const text = ev.text || "";
         if (!text) return;
         flushRail();
+        flushObservationTerminal();
         if (!currentAssistantBubble) {
           const row = document.createElement("div");
           row.className = "bubble-row assistant";
@@ -292,8 +344,43 @@
         updateAssistantMeta();
       }
 
+      function appendObservationChunk(ev) {
+        const text = ev.text || "";
+        if (!text) return;
+        flushAssistantBubble();
+        flushRail();
+
+        if (!currentObservationTerminal) {
+          const row = document.createElement("div");
+          row.className = "terminal-row";
+
+          const header = document.createElement("div");
+          header.className = "terminal-header";
+          header.textContent = `${chunkTag(ev) || "observation"} · ${fmtTime(ev.created_at)}`;
+
+          const screen = document.createElement("pre");
+          screen.className = "terminal-screen";
+
+          row.appendChild(header);
+          row.appendChild(screen);
+          timeline.appendChild(row);
+
+          currentObservationTerminal = row;
+          currentObservationScreen = screen;
+          currentObservationHeader = header;
+          currentObservationText = "";
+        }
+
+        currentObservationText += text;
+        currentObservationScreen.innerHTML = renderAnsi(currentObservationText);
+        currentObservationScreen.scrollTop = currentObservationScreen.scrollHeight;
+        currentObservationHeader.textContent =
+          `${chunkTag(ev) || "observation"} · ${fmtTime(ev.created_at)}`;
+      }
+
       function appendUserBubble(ev) {
         flushAssistantBubble();
+        flushObservationTerminal();
         flushRail();
         const row = document.createElement("div");
         row.className = "bubble-row user";
@@ -314,6 +401,7 @@
 
       function appendTrace(ev) {
         flushAssistantBubble();
+        flushObservationTerminal();
         const rail = ensureRail();
 
         const trace = document.createElement("div");
@@ -401,8 +489,16 @@
         if (typeof ev.sequence === "number") {
           lastSequenceSeen = Math.max(lastSequenceSeen, ev.sequence);
         }
-        if (ev.source === "agent_stream" && ev.kind === "delta") {
-          appendAssistantDelta(ev);
+        if (isAgentChunk(ev)) {
+          const tag = chunkTag(ev);
+          if (tag === "observation") {
+            appendObservationChunk(ev);
+          } else {
+            appendAssistantDelta(ev);
+          }
+        } else if (isItemTermination(ev)) {
+          flushAssistantBubble();
+          flushObservationTerminal();
         } else if (ev.source === "user" && ev.kind === "steer") {
           appendUserBubble(ev);
         } else {
@@ -416,7 +512,7 @@
       function applyStatusClass(status) {
         statusLabel.classList.remove(
           "status-completed", "status-failed", "status-running",
-          "status-queued", "status-pending"
+          "status-queued", "status-pending", "status-waiting", "status-stopped"
         );
         statusLabel.classList.add("status-" + (status || "pending"));
       }

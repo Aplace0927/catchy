@@ -336,6 +336,8 @@
       .status-completed { color: var(--ok); }
       .status-failed    { color: var(--err); }
       .status-queued    { color: var(--warn); }
+      .status-waiting   { color: var(--info); }
+      .status-stopped   { color: var(--muted); }
       .status-public    { color: var(--info); }
       @keyframes pulse {
         0%, 100% { opacity: 1; }
@@ -529,6 +531,33 @@
         margin-top: 6px;
         padding: 0 4px;
       }
+      .terminal-row {
+        align-self: stretch;
+        max-width: 92%;
+        display: flex;
+        flex-direction: column;
+      }
+      .terminal-header {
+        font-family: var(--mono);
+        font-size: 10px;
+        color: var(--muted);
+        margin: 0 0 6px 4px;
+      }
+      .terminal-screen {
+        background: #07090d;
+        color: #d6deeb;
+        border: 1px solid #1a2130;
+        font-family: var(--mono);
+        font-size: 12px;
+        line-height: 1.5;
+        margin: 0;
+        max-height: 520px;
+        overflow: auto;
+        padding: 14px 16px;
+        tab-size: 2;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
 
       /* OTEL-style trace */
       .trace-rail {
@@ -625,7 +654,7 @@
       .trace-body pre { margin: 0; max-height: 360px; overflow: auto; padding: 12px; font-size: 11px; }
 
       /* steer composer */
-      .steer-floating {
+      .thread-floating {
         position: fixed;
         left: 50%;
         bottom: 20px;
@@ -633,6 +662,34 @@
         width: calc(100% - 32px);
         max-width: 680px;
         z-index: 40;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .thread-floating-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 6px;
+        flex-wrap: wrap;
+      }
+      .thread-floating-actions form { margin: 0; }
+      .thread-floating-btn {
+        min-width: 58px;
+        height: 30px;
+        background: var(--paper);
+        color: var(--ink);
+        border: 1px solid var(--ink);
+        cursor: pointer;
+        font-family: var(--mono);
+        font-size: 11px;
+        font-weight: 600;
+        padding: 0 10px;
+      }
+      .thread-floating-btn:hover {
+        background: var(--ink);
+        color: var(--paper);
+      }
+      .steer-floating {
         background: var(--ink);
         color: var(--paper);
         border: 1px solid var(--ink);

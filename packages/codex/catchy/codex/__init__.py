@@ -11,6 +11,18 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, AsyncGenerator, Literal, cast
 
+import tomli_w
+from catchy.core.agents.models import (
+    Chunk,
+    Event,
+    Interrupt,
+    ItemCompleted,
+    Nop,
+    Prompt,
+    Steer,
+    Stop,
+    TurnCompleted,
+)
 from catchy.core.agents.protocols import Agent
 from catchy.core.challenge.models import Challenge
 from catchy.core.webhook.models import Webhook
@@ -46,7 +58,6 @@ from pydantic import (
     field_serializer,
     field_validator,
 )
-import tomli_w
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -470,7 +481,8 @@ class CodexAgent(Agent):
         workspace: Path,
         metadata_directory: Path,
         webhook: Webhook | None = None,
-    ) -> AsyncGenerator[str, str | None]:
+        prompt: str | None = None,
+    ) -> AsyncGenerator[Event, Interrupt]:
         if not workspace.exists():
             raise ValueError(f"workspace does not exist: {workspace}")
         if not workspace.is_dir():
@@ -529,74 +541,88 @@ class CodexAgent(Agent):
                             f"Expected at most one thread, but found {len(threads)}"
                         )
 
-                prompt = Template(self._user_prompt_template).render(
+                default_prompt = Template(self._user_prompt_template).render(
                     challenge=challenge,
                     webhook=webhook,
                 )
+                next_prompt: str | None = prompt or default_prompt
 
-                turn = await thread.turn(TextInput(prompt))
+                while next_prompt is not None:
+                    turn = await thread.turn(TextInput(next_prompt))
+                    next_prompt = None
 
-                item_message = ""
-
-                async for event in turn.stream():
-                    match event.payload:
-                        case ItemStartedNotification():
-                            item_message = ""
-                        case ItemCompletedNotification():
-                            if item_message.strip():
-                                steering_message = yield item_message
-
-                                if steering_message is not None:
-                                    await turn.steer(TextInput(steering_message))
-
-                            item_message = ""
-                        case ErrorNotification() as payload if (
-                            payload.turn_id == turn.id
-                        ):
-                            if payload.will_retry:
-                                _LOGGER.warning(
-                                    f"({self._id})({challenge.id}) Codex turn error; server will retry: {payload.error.message}"
+                    async for codex_event in turn.stream():
+                        match codex_event.payload:
+                            case ItemStartedNotification():
+                                event = Nop()
+                            case ItemCompletedNotification():
+                                event = ItemCompleted()
+                            case ErrorNotification() as payload if (
+                                payload.turn_id == turn.id
+                            ):
+                                if payload.will_retry:
+                                    _LOGGER.warning(
+                                        f"({self._id})({challenge.id}) Codex turn error; server will retry: {payload.error.message}"
+                                    )
+                                    continue
+                                raise RuntimeError(
+                                    f"Codex reported a non-retryable turn error: {payload.error.message}"
                                 )
-                                continue
-                            raise RuntimeError(
-                                f"Codex reported a non-retryable turn error: {payload.error.message}"
-                            )
-                        case TurnCompletedNotification() as payload if (
-                            payload.turn.id == turn.id
-                        ):
-                            match payload.turn.status:
-                                case TurnStatus.completed:
-                                    pass
-                                case TurnStatus.failed:
-                                    raise RuntimeError(
-                                        f"Codex turn failed: {payload.turn.error.message if payload.turn.error else 'unknown error'}"
-                                    )
-                                case TurnStatus.interrupted:
-                                    raise RuntimeError(
-                                        f"Codex turn was interrupted: {payload.turn.error.message if payload.turn.error else 'unknown error'}"
-                                    )
-                                case TurnStatus.in_progress:
-                                    raise RuntimeError(
-                                        "Codex emitted turn/completed while the turn is still in progress"
-                                    )
-                        case (
-                            AgentMessageDeltaNotification()
-                            | PlanDeltaNotification()
-                            | ReasoningSummaryTextDeltaNotification()
-                            | CommandExecutionOutputDeltaNotification()
-                            | FileChangeOutputDeltaNotification()
-                        ) as payload:
-                            item_message += payload.delta
-                        case ReasoningSummaryPartAddedNotification() as payload:
-                            _LOGGER.info(f"({self._id})({challenge.id}) {payload}")
-                        case TerminalInteractionNotification() as payload:
-                            _LOGGER.info(f"({self._id})({challenge.id}) {payload}")
-                        case McpToolCallProgressNotification() as payload:
-                            _LOGGER.info(f"({self._id})({challenge.id}) {payload}")
-                        case _:
-                            _LOGGER.debug(
-                                f"({self._id})({challenge.id}) Ignoring Codex event: {event.method}"
-                            )
+                            case TurnCompletedNotification() as payload if (
+                                payload.turn.id == turn.id
+                            ):
+                                match payload.turn.status:
+                                    case TurnStatus.completed:
+                                        event = TurnCompleted()
+                                    case TurnStatus.failed:
+                                        raise RuntimeError(
+                                            f"Codex turn failed: {payload.turn.error.message if payload.turn.error else 'unknown error'}"
+                                        )
+                                    case TurnStatus.interrupted:
+                                        raise RuntimeError(
+                                            f"Codex turn was interrupted: {payload.turn.error.message if payload.turn.error else 'unknown error'}"
+                                        )
+                                    case TurnStatus.in_progress:
+                                        raise RuntimeError(
+                                            "Codex emitted turn/completed while the turn is still in progress"
+                                        )
+                            case (
+                                AgentMessageDeltaNotification()
+                                | PlanDeltaNotification()
+                                | ReasoningSummaryTextDeltaNotification()
+                                | FileChangeOutputDeltaNotification()
+                            ) as payload:
+                                event = Chunk(tag="action", text=payload.delta)
+                            case CommandExecutionOutputDeltaNotification() as payload:
+                                event = Chunk(tag="observation", text=payload.delta)
+                            case ReasoningSummaryPartAddedNotification() as payload:
+                                _LOGGER.info(f"({self._id})({challenge.id}) {payload}")
+                                event = Nop()
+                            case TerminalInteractionNotification() as payload:
+                                _LOGGER.info(f"({self._id})({challenge.id}) {payload}")
+                                event = Nop()
+                            case McpToolCallProgressNotification() as payload:
+                                _LOGGER.info(f"({self._id})({challenge.id}) {payload}")
+                                event = Nop()
+                            case _:
+                                _LOGGER.debug(
+                                    f"({self._id})({challenge.id}) Ignoring Codex event: {codex_event.method}"
+                                )
+                                event = Nop()
+
+                        interrupt = yield event
+
+                        match interrupt:
+                            case Steer() as steer:
+                                await turn.steer(TextInput(steer.text))
+                            case Prompt() as prompt_interrupt:
+                                next_prompt = prompt_interrupt.text
+                                break
+                            case Stop():
+                                await turn.interrupt()
+                                return
+                            case Nop():
+                                ...
 
     @contextmanager
     def _docker_container(

@@ -1,9 +1,23 @@
 from __future__ import annotations
 
+import tempfile
+from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+from asgiref.sync import async_to_sync
+from catchy.core.agents.models import (
+    Chunk,
+    Event,
+    Interrupt,
+    ItemCompleted,
+    Nop,
+    Steer,
+    Stop,
+)
+from catchy.core.agents.protocols import Agent
+from catchy.core.challenge.models import Challenge as CoreChallenge
 from django.contrib.auth.models import Group, User
 from django.core.exceptions import PermissionDenied
 from django.db import OperationalError
@@ -305,6 +319,115 @@ class StreamEventRecordingTests(TestCase):
         self.assertEqual(event.sequence, 1)
         self.assertEqual(event.text, "hello")
 
+    def test_record_stream_event_persists_chunk_tag(self) -> None:
+        services._record_stream_event(
+            self.thread.pk,
+            Chunk(tag="action", text="hello"),
+            "gpt-5.5",
+        )
+
+        event = StreamEvent.objects.get(thread=self.thread)
+        self.assertEqual(event.source, "agent_stream")
+        self.assertEqual(event.kind, "chunk")
+        self.assertEqual(event.text, "hello")
+        self.assertEqual(event.raw, {"tag": "action"})
+
+    def test_record_stream_event_persists_item_termination(self) -> None:
+        with patch("catchy.web.ctf.services.ingest_codex_sessions") as ingest:
+            services._record_stream_event(
+                self.thread.pk,
+                ItemCompleted(),
+                "gpt-5.5",
+            )
+
+        event = StreamEvent.objects.get(thread=self.thread)
+        self.assertEqual(event.source, "agent_stream")
+        self.assertEqual(event.kind, "item.terminated")
+        self.assertEqual(event.text, "")
+        ingest.assert_called_once()
+
+    def test_record_stream_event_ignores_nop(self) -> None:
+        services._record_stream_event(self.thread.pk, Nop(), "gpt-5.5")
+
+        self.assertFalse(StreamEvent.objects.filter(thread=self.thread).exists())
+
+    def test_pop_next_thread_command_returns_steer_interrupt(self) -> None:
+        SteeringMessage.objects.create(
+            thread=self.thread,
+            kind=SteeringMessage.Kind.STEER,
+            text="try another path",
+        )
+
+        command = services._pop_next_thread_command(self.thread.pk)
+
+        self.assertIsInstance(command, Steer)
+        self.assertEqual(command.text, "try another path")
+        message = SteeringMessage.objects.get(thread=self.thread)
+        self.assertIsNotNone(message.delivered_at)
+        self.assertEqual(
+            list(
+                StreamEvent.objects.filter(thread=self.thread).values_list(
+                    "source", "kind", "text"
+                )
+            ),
+            [("user", "steer", "try another path")],
+        )
+
+    def test_pop_next_thread_command_returns_stop_interrupt(self) -> None:
+        SteeringMessage.objects.create(
+            thread=self.thread,
+            kind=SteeringMessage.Kind.STOP,
+        )
+
+        command = services._pop_next_thread_command(self.thread.pk)
+
+        self.assertIsInstance(command, Stop)
+        self.assertEqual(
+            list(
+                StreamEvent.objects.filter(thread=self.thread).values_list(
+                    "source", "kind", "text"
+                )
+            ),
+            [("user", "stop", "")],
+        )
+
+    def test_run_agent_stream_uses_initial_prompt_and_waits_after_turn(self) -> None:
+        agent = _PromptRecordingAgent()
+        SteeringMessage.objects.create(
+            thread=self.thread,
+            kind=SteeringMessage.Kind.PROMPT,
+            text="try another path",
+        )
+
+        status = async_to_sync(services._run_agent_stream)(
+            thread_id=self.thread.pk,
+            agent=agent,
+            challenge=CoreChallenge(
+                id=self.challenge.challenge_id,
+                description="",
+                directory=Path("/tmp"),
+            ),
+            workspace=Path("/tmp"),
+            metadata=Path("/tmp"),
+            webhook=None,
+            model_name="gpt-5.5",
+        )
+
+        self.assertEqual(status, Thread.Status.WAITING)
+        self.assertEqual(agent.prompts, ["try another path"])
+        self.assertEqual(
+            list(
+                StreamEvent.objects.filter(thread=self.thread).values_list(
+                    "source", "kind", "text"
+                )
+            ),
+            [
+                ("user", "prompt", "try another path"),
+                ("agent_stream", "chunk", "ready"),
+                ("agent_stream", "item.terminated", ""),
+            ],
+        )
+
     def test_thread_root_reuses_existing_root_when_resuming(self) -> None:
         self.thread.thread_root = "/tmp/catchy-existing-thread"
 
@@ -312,6 +435,42 @@ class StreamEventRecordingTests(TestCase):
             services._thread_root(self.thread),
             Path("/tmp/catchy-existing-thread"),
         )
+
+
+class _SteerRecordingAgent(Agent):
+    def __init__(self) -> None:
+        self.interrupts: list[Interrupt] = []
+
+    async def stream(
+        self,
+        *,
+        challenge: CoreChallenge,
+        workspace: Path,
+        metadata_directory: Path,
+        webhook: Any | None = None,
+        prompt: str | None = None,
+    ) -> AsyncGenerator[Event, Interrupt]:
+        interrupt = yield Chunk(tag="action", text="ready")
+        self.interrupts.append(interrupt)
+        yield ItemCompleted()
+
+
+class _PromptRecordingAgent(Agent):
+    def __init__(self) -> None:
+        self.prompts: list[str | None] = []
+
+    async def stream(
+        self,
+        *,
+        challenge: CoreChallenge,
+        workspace: Path,
+        metadata_directory: Path,
+        webhook: Any | None = None,
+        prompt: str | None = None,
+    ) -> AsyncGenerator[Event, Interrupt]:
+        self.prompts.append(prompt)
+        yield Chunk(tag="action", text="ready")
+        yield ItemCompleted()
 
 
 class PublicThreadAccessTests(TestCase):
@@ -420,7 +579,9 @@ class PublicThreadAccessTests(TestCase):
         self.assertRedirects(response, thread.get_absolute_url())
         self.assertFalse(thread.is_public)
 
-    def test_steering_completed_thread_queues_message_and_restarts_worker(self) -> None:
+    def test_message_to_completed_thread_queues_prompt_and_restarts_worker(
+        self,
+    ) -> None:
         thread = self._create_thread("resume-completed", is_public=False)
         thread.error = "old stop"
         thread.thread_root = "/tmp/catchy-existing-thread"
@@ -438,6 +599,10 @@ class PublicThreadAccessTests(TestCase):
         self.assertEqual(thread.status, Thread.Status.QUEUED)
         self.assertEqual(thread.error, "")
         self.assertEqual(thread.steering_messages.get().text, "try the other path")
+        self.assertEqual(
+            thread.steering_messages.get().kind,
+            SteeringMessage.Kind.PROMPT,
+        )
         self.assertEqual(start_thread.call_args.args[0].pk, thread.pk)
 
     def test_steering_running_thread_does_not_restart_worker(self) -> None:
@@ -456,7 +621,114 @@ class PublicThreadAccessTests(TestCase):
         self.assertRedirects(response, thread.get_absolute_url())
         self.assertEqual(thread.status, Thread.Status.RUNNING)
         self.assertEqual(SteeringMessage.objects.get(thread=thread).text, "keep going")
+        self.assertEqual(
+            SteeringMessage.objects.get(thread=thread).kind,
+            SteeringMessage.Kind.STEER,
+        )
         start_thread.assert_not_called()
+
+    def test_message_to_queued_thread_queues_prompt_without_restarting_worker(
+        self,
+    ) -> None:
+        thread = self._create_thread("message-queued", is_public=False)
+        thread.status = Thread.Status.QUEUED
+        thread.save(update_fields=["status", "updated_at"])
+        self.client.force_login(self.user)
+
+        with patch("catchy.web.ctf.views.start_thread") as start_thread:
+            response = self.client.post(
+                reverse("ctf:thread_steer", kwargs={"pk": thread.pk}),
+                {"text": "use this as the turn prompt"},
+            )
+
+        thread.refresh_from_db()
+        self.assertRedirects(response, thread.get_absolute_url())
+        self.assertEqual(thread.status, Thread.Status.QUEUED)
+        self.assertEqual(
+            SteeringMessage.objects.get(thread=thread).kind,
+            SteeringMessage.Kind.PROMPT,
+        )
+        start_thread.assert_not_called()
+
+    def test_stop_running_thread_queues_stop_message(self) -> None:
+        thread = self._create_thread("stop-running", is_public=False)
+        thread.status = Thread.Status.RUNNING
+        thread.save(update_fields=["status", "updated_at"])
+        self.client.force_login(self.user)
+
+        response = self.client.post(
+            reverse("ctf:thread_stop", kwargs={"pk": thread.pk})
+        )
+
+        thread.refresh_from_db()
+        self.assertRedirects(response, thread.get_absolute_url())
+        self.assertEqual(thread.status, Thread.Status.RUNNING)
+        self.assertEqual(
+            SteeringMessage.objects.get(thread=thread).kind,
+            SteeringMessage.Kind.STOP,
+        )
+
+    def test_stop_waiting_thread_marks_stopped(self) -> None:
+        thread = self._create_thread("stop-waiting", is_public=False)
+        thread.status = Thread.Status.WAITING
+        thread.save(update_fields=["status", "updated_at"])
+        self.client.force_login(self.user)
+
+        response = self.client.post(
+            reverse("ctf:thread_stop", kwargs={"pk": thread.pk})
+        )
+
+        thread.refresh_from_db()
+        self.assertRedirects(response, thread.get_absolute_url())
+        self.assertEqual(thread.status, Thread.Status.STOPPED)
+        self.assertEqual(
+            list(thread.events.values_list("source", "kind", "text")),
+            [("user", "stop", "")],
+        )
+
+    def test_fork_thread_copies_metadata_and_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source_root = Path(tmp) / "source"
+            source_metadata = source_root / "metadata"
+            source_metadata.mkdir(parents=True)
+            (source_metadata / "session.jsonl").write_text("history\n")
+            target_root = Path(tmp) / "target"
+
+            thread = self._create_thread("fork-source", is_public=False)
+            thread.thread_root = str(source_root)
+            thread.metadata_path = str(source_metadata)
+            thread.save(update_fields=["thread_root", "metadata_path", "updated_at"])
+            StreamEvent.objects.create(
+                thread=thread,
+                sequence=1,
+                dedupe_key="history-one",
+                source="agent_stream",
+                kind="chunk",
+                text="hello",
+                raw={"tag": "action"},
+            )
+            self.client.force_login(self.user)
+
+            with patch("catchy.web.ctf.services._thread_root") as thread_root:
+                thread_root.return_value = target_root
+                response = self.client.post(
+                    reverse("ctf:thread_fork", kwargs={"pk": thread.pk})
+                )
+
+            fork = Thread.objects.exclude(pk=thread.pk).get()
+            self.assertTrue((target_root / "metadata" / "session.jsonl").exists())
+
+        self.assertRedirects(response, fork.get_absolute_url())
+        self.assertEqual(fork.status, Thread.Status.WAITING)
+        self.assertEqual(fork.agent, thread.agent)
+        self.assertEqual(fork.metadata_path, str(target_root / "metadata"))
+        self.assertEqual(
+            list(fork.events.values_list("source", "kind", "text")),
+            [
+                ("agent_stream", "chunk", "hello"),
+                ("system", "thread.forked", f"Forked from thread #{thread.pk}"),
+            ],
+        )
 
     def test_thread_detail_includes_cumulative_token_count_cost(self) -> None:
         thread = self._create_thread("costed", is_public=True)

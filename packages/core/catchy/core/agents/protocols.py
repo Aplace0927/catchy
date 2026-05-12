@@ -4,6 +4,7 @@ from typing import AsyncGenerator
 
 from ..challenge.models import Challenge
 from ..webhook.models import Webhook
+from .models import Event, Interrupt
 
 
 class Agent(ABC):
@@ -15,4 +16,5 @@ class Agent(ABC):
         workspace: Path,
         metadata_directory: Path,
         webhook: Webhook | None = None,
-    ) -> AsyncGenerator[str, str | None]: ...
+        prompt: str | None = None,
+    ) -> AsyncGenerator[Event, Interrupt]: ...

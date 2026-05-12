@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import shutil
 import tarfile
 import threading
 import time
@@ -11,6 +12,21 @@ from pathlib import Path
 from typing import Any, cast
 
 from asgiref.sync import sync_to_async
+from catchy.codex import estimate_codex_session_jsonl_cost
+from catchy.core.agents.models import (
+    Chunk,
+    Event,
+    Interrupt,
+    ItemCompleted,
+    Nop,
+    Prompt,
+    Steer,
+    Stop,
+    TurnCompleted,
+)
+from catchy.core.agents.protocols import Agent
+from catchy.core.challenge.models import Challenge as CoreChallenge
+from catchy.core.webhook.models import Webhook
 from django.conf import settings
 from django.core.exceptions import PermissionDenied
 from django.db import (
@@ -21,11 +37,6 @@ from django.db import (
 )
 from django.db.models import Max
 from django.utils import timezone
-
-from catchy.codex import estimate_codex_session_jsonl_cost
-from catchy.core.agents.protocols import Agent
-from catchy.core.challenge.models import Challenge as CoreChallenge
-from catchy.core.webhook.models import Webhook
 
 from .models import (
     AgentConfiguration,
@@ -52,6 +63,62 @@ def start_thread(thread: Thread) -> Any:
     thread.task_result_id = f"local-thread:{worker.name}"
     thread.save(update_fields=["task_result_id", "updated_at"])
     return worker
+
+
+def fork_thread(thread: Thread, *, user: Any | None = None) -> Thread:
+    fork = Thread.objects.create(
+        ctf=thread.ctf,
+        challenge=thread.challenge,
+        agent=thread.agent,
+        model=thread.model,
+        credential=thread.credential,
+        created_by=user or thread.created_by,
+        name=_fork_thread_name(thread),
+        status=Thread.Status.WAITING,
+        latest_cost_usd=thread.latest_cost_usd,
+        latest_cost=thread.latest_cost,
+    )
+
+    thread_root = _thread_root(fork)
+    metadata = thread_root / "metadata"
+    workspace = thread_root / "workspace"
+    metadata.mkdir(parents=True, exist_ok=True)
+    workspace.mkdir(parents=True, exist_ok=True)
+    if thread.metadata_path:
+        source_metadata = Path(thread.metadata_path)
+        if source_metadata.exists():
+            shutil.copytree(source_metadata, metadata, dirs_exist_ok=True)
+
+    fork.thread_root = str(thread_root)
+    fork.workspace_path = str(workspace)
+    fork.metadata_path = str(metadata)
+    fork.save(
+        update_fields=[
+            "thread_root",
+            "workspace_path",
+            "metadata_path",
+            "updated_at",
+        ]
+    )
+
+    for event in thread.events.order_by("sequence"):
+        StreamEvent.objects.create(
+            thread=fork,
+            sequence=event.sequence,
+            dedupe_key=event.dedupe_key,
+            source=event.source,
+            kind=event.kind,
+            text=event.text,
+            raw=event.raw,
+        )
+    _record_event(
+        fork,
+        source="system",
+        kind="thread.forked",
+        text=f"Forked from thread #{thread.pk}",
+        raw={"source_thread_id": thread.pk},
+    )
+    return fork
 
 
 def _run_thread_in_local_worker(thread_id: int) -> None:
@@ -118,7 +185,7 @@ def run_thread_sync(thread_id: int) -> None:
         )
         webhook_data = thread.challenge.webhook_mapping()
         webhook = Webhook(**webhook_data) if webhook_data else None
-        asyncio.run(
+        terminal_status = asyncio.run(
             _run_agent_stream(
                 thread_id=thread.pk,
                 agent=agent,
@@ -139,11 +206,15 @@ def run_thread_sync(thread_id: int) -> None:
         raise
 
     Thread.objects.filter(pk=thread.pk).update(
-        status=Thread.Status.COMPLETED,
+        status=terminal_status,
         updated_at=timezone.now(),
     )
+    thread.status = terminal_status
     _record_event(
-        thread, source="system", kind="thread.completed", text="Thread completed"
+        thread,
+        source="system",
+        kind=f"thread.{terminal_status}",
+        text=f"Thread {terminal_status}",
     )
 
 
@@ -261,65 +332,117 @@ async def _run_agent_stream(
     metadata: Path,
     webhook: Webhook | None,
     model_name: str,
-) -> None:
+) -> Thread.Status:
+    initial_prompt: str | None = None
+    initial_command = await sync_to_async(
+        _pop_next_thread_command,
+        thread_sensitive=True,
+    )(thread_id)
+    match initial_command:
+        case Prompt() as prompt:
+            initial_prompt = prompt.text
+        case Stop():
+            return Thread.Status.STOPPED
+        case Steer() as steer:
+            initial_prompt = steer.text
+        case Nop():
+            ...
+
     stream = agent.stream(
         challenge=challenge,
         workspace=workspace,
         metadata_directory=metadata,
         webhook=webhook,
+        prompt=initial_prompt,
     )
-    steering_message: str | None = None
+    interrupt: Interrupt = Nop()
+    is_started = False
+    stop_requested = False
     while True:
         try:
-            if steering_message is None:
-                delta = await stream.__anext__()
+            if not is_started:
+                event = await stream.__anext__()
+                is_started = True
             else:
-                delta = await stream.asend(steering_message)
-                steering_message = None
+                event = await stream.asend(interrupt)
         except StopAsyncIteration:
-            return
+            return Thread.Status.STOPPED if stop_requested else Thread.Status.WAITING
 
-        await sync_to_async(_record_stream_delta, thread_sensitive=True)(
+        await sync_to_async(_record_stream_event, thread_sensitive=True)(
             thread_id,
-            delta,
+            event,
             model_name,
         )
-        steering_message = await sync_to_async(
-            _pop_next_steering_message,
+        command = await sync_to_async(
+            _pop_next_thread_command,
             thread_sensitive=True,
         )(thread_id)
+        if isinstance(command, Stop):
+            stop_requested = True
+        interrupt = command
 
 
-def _record_stream_delta(thread_id: int, delta: str, model_name: str) -> None:
+def _record_stream_event(thread_id: int, event: Event, model_name: str) -> None:
     thread = Thread.objects.get(pk=thread_id)
-    _record_event(
-        thread,
-        source="agent_stream",
-        kind="delta",
-        text=delta,
-    )
-    ingest_codex_sessions(thread, model_name=model_name)
+    match event:
+        case Chunk() as chunk:
+            if not chunk.text:
+                return
+            _record_event(
+                thread,
+                source="agent_stream",
+                kind="chunk",
+                text=chunk.text,
+                raw={"tag": chunk.tag},
+            )
+        case ItemCompleted():
+            _record_event(
+                thread,
+                source="agent_stream",
+                kind="item.terminated",
+                text="",
+            )
+            ingest_codex_sessions(thread, model_name=model_name)
+        case TurnCompleted():
+            _record_event(
+                thread,
+                source="agent_stream",
+                kind="turn.completed",
+                text="",
+            )
+            ingest_codex_sessions(thread, model_name=model_name)
+        case Nop():
+            return
 
 
-def _pop_next_steering_message(thread_id: int) -> str | None:
+def _pop_next_thread_command(thread_id: int) -> Interrupt:
     message = (
         SteeringMessage.objects.filter(thread_id=thread_id, delivered_at__isnull=True)
         .order_by("created_at")
         .first()
     )
     if message is None:
-        return None
+        return Nop()
 
     message.delivered_at = timezone.now()
     message.save(update_fields=["delivered_at", "updated_at"])
+    if message.kind == SteeringMessage.Kind.STOP:
+        event_kind = "stop"
+        interrupt: Interrupt = Stop()
+    elif message.kind == SteeringMessage.Kind.PROMPT:
+        event_kind = "prompt"
+        interrupt = Prompt(text=message.text)
+    else:
+        event_kind = "steer"
+        interrupt = Steer(text=message.text)
     _record_event(
         message.thread,
         source="user",
-        kind="steer",
+        kind=event_kind,
         text=message.text,
         raw={"steering_message_id": message.pk},
     )
-    return message.text
+    return interrupt
 
 
 def _ingest_session_file(thread: Thread, path: Path) -> None:
@@ -502,6 +625,13 @@ def _thread_model_name(thread: Thread) -> str:
     if isinstance(model, dict) and isinstance(model.get("name"), str):
         return str(model["name"])
     return "unknown"
+
+
+def _fork_thread_name(thread: Thread) -> str:
+    base_name = thread.name or f"thread-{thread.pk}"
+    suffix = "-fork"
+    max_base_length = 80 - len(suffix)
+    return f"{base_name[:max_base_length]}{suffix}"
 
 
 def _thread_root(thread: Thread) -> Path:

@@ -39,7 +39,9 @@ urlpatterns = [
         name="thread_create",
     ),
     path("threads/<int:pk>/", views.thread_detail, name="thread_detail"),
+    path("threads/<int:pk>/fork/", views.thread_fork, name="thread_fork"),
     path("threads/<int:pk>/publish/", views.thread_publish, name="thread_publish"),
     path("threads/<int:pk>/steer/", views.thread_steer, name="thread_steer"),
+    path("threads/<int:pk>/stop/", views.thread_stop, name="thread_stop"),
     path("threads/<int:pk>/stream/", views.thread_stream, name="thread_stream"),
 ]

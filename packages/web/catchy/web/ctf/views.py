@@ -9,6 +9,7 @@ from uuid import UUID
 
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
+from django.contrib.auth.views import redirect_to_login
 from django.core.exceptions import PermissionDenied
 from django.db.models import Q, QuerySet
 from django.http import HttpRequest, HttpResponse, JsonResponse, StreamingHttpResponse
@@ -552,6 +553,11 @@ def thread_create(
     return redirect(thread)
 
 
+def thread_detail_legacy(request: HttpRequest, pk: int) -> HttpResponse:
+    thread = get_object_or_404(Thread.objects.select_related("ctf"), pk=pk)
+    return redirect(thread)
+
+
 def thread_detail(request: HttpRequest, thread_uuid: UUID) -> HttpResponse:
     thread = get_object_or_404(
         Thread.objects.select_related(
@@ -742,34 +748,41 @@ def thread_stream(request: HttpRequest, thread_uuid: UUID) -> HttpResponse:
     return response
 
 
-def thread_filetree(request: HttpRequest, pk: int) -> HttpResponse:
-    thread = get_object_or_404(Thread.objects.select_related("ctf"), pk=pk)
+def thread_filetree(request: HttpRequest, thread_uuid: UUID) -> HttpResponse:
+    thread = get_object_or_404(Thread.objects.select_related("ctf"), uuid=thread_uuid)
     if not thread.can_view(request.user):
         if not request.user.is_authenticated:
             return redirect_to_login(request.get_full_path())
         raise PermissionDenied
 
-    # Prefer the explicit thread root, fall back to workspace or metadata
-    root_path = thread.thread_root or thread.workspace_path or thread.metadata_path
+    # The thread root also contains runtime internals; the viewer should expose
+    # only the editable workspace subtree that the agent actually works in.
+    root_path = thread.workspace_path
+    if not root_path and thread.thread_root:
+        root_path = str(Path(thread.thread_root) / "workspace")
     if not root_path:
-        return JsonResponse({"error": "no file root for thread"}, status=404)
+        return JsonResponse({"error": "no workspace for thread"}, status=404)
 
     root = Path(root_path)
     if not root.exists():
-        return JsonResponse({"error": "file root not found"}, status=404)
+        return JsonResponse({"error": "workspace not found"}, status=404)
 
     def build_node(
         p: Path,
         base: Path,
         depth: int = 6,
         entries_limit: int = 2000,
-        counter: dict | None = None,
+        counter: dict[str, int] | None = None,
     ):
         if counter is None:
             counter = {"n": 0}
         name = p.name
         rel = str(p.relative_to(base))
-        node = {"name": name, "path": rel, "type": "dir" if p.is_dir() else "file"}
+        node: dict[str, Any] = {
+            "name": name,
+            "path": rel,
+            "type": "dir" if p.is_dir() else "file",
+        }
         if p.is_dir() and depth > 0 and counter["n"] < entries_limit:
             children = []
             try:

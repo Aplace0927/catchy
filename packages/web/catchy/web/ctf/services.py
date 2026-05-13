@@ -37,6 +37,7 @@ from .models import (
     AgentConfiguration,
     Credential,
     ModelConfiguration,
+    ModelPricing,
     SteeringMessage,
     StreamEvent,
     Thread,
@@ -70,7 +71,6 @@ def fork_thread(thread: Thread, *, user: Any | None = None) -> Thread:
         created_by=user or thread.created_by,
         name=_fork_thread_name(thread),
         status=Thread.Status.WAITING,
-        latest_cost_usd=thread.latest_cost_usd,
         latest_cost=thread.latest_cost,
     )
 
@@ -391,7 +391,9 @@ async def _run_agent_stream(
 
 
 def _record_stream_event(thread_id: int, event: Event, model_name: str) -> None:
-    thread = Thread.objects.get(pk=thread_id)
+    thread = Thread.objects.select_related(
+        "model", "credential", "credential__provider"
+    ).get(pk=thread_id)
     match event:
         case Chunk() as chunk:
             if not chunk.text:
@@ -570,23 +572,60 @@ def _record_token_usage_snapshot(
     model_name: str,
     raw: dict[str, Any],
 ) -> None:
-    snapshot = _token_usage_snapshot(raw, model_name=model_name)
+    snapshot = token_usage_snapshot_for_thread(
+        thread,
+        raw=raw,
+        model_name=model_name,
+    )
     if snapshot is None:
         return
-    thread.latest_cost_usd = Decimal("0")
+    snapshot.pop("pricing", None)
+    snapshot.pop("usd", None)
     thread.latest_cost = snapshot
-    thread.save(update_fields=["latest_cost_usd", "latest_cost", "updated_at"])
+    thread.save(update_fields=["latest_cost", "updated_at"])
     ThreadCostSnapshot.objects.create(
         thread=thread,
-        usd=thread.latest_cost_usd,
         usage=snapshot,
     )
+
+
+def token_usage_snapshot_for_thread(
+    thread: Thread,
+    *,
+    raw: dict[str, Any],
+    model_name: str | None = None,
+) -> dict[str, Any] | None:
+    return _token_usage_snapshot(
+        raw,
+        model_name=model_name or _thread_model_name(thread),
+        provider_slug=_provider_slug_for_thread(thread),
+    )
+
+
+def token_usage_cost_usd(
+    thread: Thread,
+    *,
+    raw: dict[str, Any],
+    model_name: str | None = None,
+) -> Decimal | None:
+    snapshot = token_usage_snapshot_for_thread(
+        thread,
+        raw=raw,
+        model_name=model_name,
+    )
+    if snapshot is None:
+        return None
+    pricing = _model_pricing_for_snapshot(thread, snapshot)
+    if pricing is None:
+        return None
+    return pricing.estimate_usd(snapshot)
 
 
 def _token_usage_snapshot(
     raw: dict[str, Any],
     *,
     model_name: str,
+    provider_slug: str | None = None,
 ) -> dict[str, Any] | None:
     usage = _token_usage_from_raw(raw)
     if usage is None:
@@ -617,7 +656,9 @@ def _token_usage_snapshot(
     provider = raw.get("provider")
     model = raw.get("model")
     return {
-        "provider": provider if isinstance(provider, str) and provider else "openai",
+        "provider": provider
+        if isinstance(provider, str) and provider
+        else provider_slug or "openai",
         "model": model if isinstance(model, str) and model else model_name,
         "input_tokens": input_tokens,
         "cached_input_tokens": cached_input_tokens,
@@ -626,8 +667,54 @@ def _token_usage_snapshot(
         "output_tokens": output_tokens,
         "reasoning_output_tokens": reasoning_output_tokens,
         "total_tokens": total_tokens,
-        "usd": "0",
     }
+
+
+def _model_pricing_for_snapshot(
+    thread: Thread,
+    snapshot: dict[str, Any],
+) -> ModelPricing | None:
+    provider_slug = snapshot.get("provider")
+    model_name = snapshot.get("model")
+    if not isinstance(provider_slug, str) or not provider_slug:
+        provider_slug = _provider_slug_for_thread(thread)
+    if not provider_slug:
+        return None
+
+    pricing = (
+        ModelPricing.objects.select_related("model", "provider")
+        .filter(provider__slug=provider_slug)
+        .filter(model=thread.model)
+        .first()
+        if thread.model_id
+        else None
+    )
+    if pricing is not None:
+        return pricing
+    if not isinstance(model_name, str) or not model_name:
+        return None
+    return (
+        ModelPricing.objects.select_related("model", "provider")
+        .filter(provider__slug=provider_slug, model__name__iexact=model_name)
+        .first()
+    )
+
+
+def _provider_slug_for_thread(thread: Thread) -> str:
+    credential = thread.credential
+    if credential is None:
+        return ""
+    provider = credential.provider
+    if provider is not None:
+        return provider.slug
+    if credential.kind in {Credential.Kind.OPENAI, Credential.Kind.CODEX_AUTH_JSON}:
+        return "openai"
+    if credential.kind in {
+        Credential.Kind.ANTHROPIC,
+        Credential.Kind.CLAUDE_OAUTH_TOKEN,
+    }:
+        return "anthropic"
+    return ""
 
 
 def _token_usage_from_raw(raw: dict[str, Any]) -> dict[str, Any] | None:

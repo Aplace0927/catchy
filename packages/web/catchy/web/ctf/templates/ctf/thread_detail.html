@@ -43,6 +43,9 @@
         {% if thread.credential %}
           <span class="muted" style="font-size: 13px;">credential · {{ thread.credential.name }}</span>
         {% endif %}
+        {% if latest_cost_usd != None %}
+          <span class="muted" style="font-size: 13px;">cost · ${{ latest_cost_usd }}</span>
+        {% endif %}
       </div>
     </div>
     <div class="actions">
@@ -274,6 +277,13 @@
             stats.push({ label, value: usage[key].toLocaleString() });
             seenLabels.add(label);
           }
+        }
+        if (ev.cost_usd !== undefined && ev.cost_usd !== null) {
+          const costValue = Number(ev.cost_usd);
+          stats.push({
+            label: "cost",
+            value: Number.isFinite(costValue) ? `$${costValue.toFixed(6)}` : `$${ev.cost_usd}`,
+          });
         }
         return { stats: stats.length ? stats : null };
       }

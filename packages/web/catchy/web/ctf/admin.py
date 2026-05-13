@@ -6,6 +6,8 @@ from .models import (
     Credential,
     Ctf,
     ModelConfiguration,
+    ModelPricing,
+    Provider,
     SteeringMessage,
     StreamEvent,
     Thread,
@@ -13,10 +15,17 @@ from .models import (
 )
 
 
+@admin.register(Provider)
+class ProviderAdmin(admin.ModelAdmin):
+    list_display = ["name", "slug", "created_at"]
+    search_fields = ["name", "slug"]
+
+
 @admin.register(Credential)
 class CredentialAdmin(admin.ModelAdmin):
-    list_display = ["name", "slug", "kind", "base_url", "created_at"]
+    list_display = ["name", "slug", "kind", "provider", "base_url", "created_at"]
     search_fields = ["name", "slug", "kind", "base_url", "organization_id"]
+    list_filter = ["provider", "kind"]
     filter_horizontal = ["allowed_groups"]
 
 
@@ -25,6 +34,20 @@ class ModelConfigurationAdmin(admin.ModelAdmin):
     list_display = ["name", "slug", "created_at"]
     search_fields = ["name", "slug"]
     filter_horizontal = ["view_groups", "use_groups"]
+
+
+@admin.register(ModelPricing)
+class ModelPricingAdmin(admin.ModelAdmin):
+    list_display = [
+        "model",
+        "provider",
+        "input_per_million",
+        "cached_input_per_million",
+        "output_per_million",
+        "created_at",
+    ]
+    list_filter = ["provider"]
+    search_fields = ["model__name", "provider__name", "provider__slug"]
 
 
 @admin.register(AgentConfiguration)
@@ -59,7 +82,6 @@ class ThreadAdmin(admin.ModelAdmin):
         "credential",
         "status",
         "is_public",
-        "latest_cost_usd",
     ]
     list_filter = ["status", "is_public", "ctf", "agent", "model", "credential"]
     search_fields = ["name", "challenge__challenge_id", "ctf__title"]
@@ -79,4 +101,4 @@ class SteeringMessageAdmin(admin.ModelAdmin):
 
 @admin.register(ThreadCostSnapshot)
 class ThreadCostSnapshotAdmin(admin.ModelAdmin):
-    list_display = ["thread", "usd", "created_at"]
+    list_display = ["thread", "created_at"]

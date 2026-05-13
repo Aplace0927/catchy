@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import importlib
 import tarfile
 import tempfile
 import zipfile
@@ -30,14 +31,22 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
 from django.urls import reverse
 
-from catchy.web.ctf import services
-from catchy.web.ctf.forms import ChallengeForm, CredentialForm, ModelConfigurationForm
+from catchy.web.ctf import services, views
+from catchy.web.ctf.forms import (
+    ChallengeForm,
+    CredentialForm,
+    ModelConfigurationForm,
+    ModelPricingForm,
+    ProviderForm,
+)
 from catchy.web.ctf.models import (
     AgentConfiguration,
     Challenge,
     Credential,
     Ctf,
     ModelConfiguration,
+    ModelPricing,
+    Provider,
     SteeringMessage,
     StreamEvent,
     Thread,
@@ -95,6 +104,21 @@ class CredentialAgentPermissionTests(TestCase):
         )
 
         self.assertTrue(form.is_valid(), form.errors)
+
+    def test_credential_form_infers_provider_from_kind(self) -> None:
+        form = CredentialForm(
+            {
+                "name": "Claude Login",
+                "slug": "claude-login",
+                "kind": Credential.Kind.CLAUDE_OAUTH_TOKEN,
+                "api_key": "oauth-secret",
+                "base_url": "",
+                "organization_id": "",
+            }
+        )
+
+        self.assertTrue(form.is_valid(), form.errors)
+        self.assertEqual(form.cleaned_data["provider"].slug, "anthropic")
 
     def test_codex_auth_json_credential_requires_json_object(self) -> None:
         form = CredentialForm(
@@ -182,6 +206,71 @@ class CredentialAgentPermissionTests(TestCase):
         )
 
         self.assertTrue(form.is_valid(), form.errors)
+
+    def test_provider_form_accepts_provider_identifier(self) -> None:
+        form = ProviderForm({"name": "OpenRouter", "slug": "openrouter"})
+
+        self.assertTrue(form.is_valid(), form.errors)
+
+    def test_provider_create_and_update_from_web(self) -> None:
+        self.client.force_login(self.allowed_user)
+
+        response = self.client.post(
+            reverse("ctf:provider_create"),
+            {"name": "OpenRouter", "slug": "openrouter"},
+        )
+
+        self.assertRedirects(response, reverse("ctf:provider_list"))
+        provider = Provider.objects.get(slug="openrouter")
+        self.assertEqual(provider.name, "OpenRouter")
+
+        response = self.client.post(
+            reverse("ctf:provider_update", kwargs={"slug": provider.slug}),
+            {"name": "OpenRouter AI", "slug": "openrouter"},
+        )
+
+        self.assertRedirects(response, reverse("ctf:provider_list"))
+        provider.refresh_from_db()
+        self.assertEqual(provider.name, "OpenRouter AI")
+
+    def test_model_pricing_form_applies_preset_to_provider_and_prices(self) -> None:
+        model = ModelConfiguration.objects.create(name="gpt-5.5", slug="gpt-55")
+        form = ModelPricingForm(
+            {
+                "model": str(model.pk),
+                "pricing_preset": "openai:gpt-5.5",
+                "provider": "",
+                "input_per_million": "",
+                "cached_input_per_million": "",
+                "output_per_million": "",
+            }
+        )
+
+        self.assertTrue(form.is_valid(), form.errors)
+        pricing = form.save()
+        self.assertEqual(pricing.provider.slug, "openai")
+        self.assertEqual(pricing.input_per_million, Decimal("5.00"))
+
+    def test_model_pricing_migration_considers_existing_gpt5_models(self) -> None:
+        migration = importlib.import_module(
+            "catchy.web.ctf.migrations.0013_provider_credential_provider_modelpricing"
+        )
+
+        expected = {
+            "gpt-5.3-codex": "gpt-5.3-codex",
+            "gpt-5.4": "gpt-5.4",
+            "gpt-5.4-nano": "gpt-5.4-nano",
+            "gpt-5.5": "gpt-5.5",
+            "gpt-5-mini": "gpt-5-mini",
+            "gpt-5-nano": "gpt-5-nano",
+        }
+
+        for model_name, preset_model in expected.items():
+            with self.subTest(model_name=model_name):
+                preset = migration._preset_for_model_name(model_name)
+                self.assertIsNotNone(preset)
+                self.assertEqual(preset[0], "openai")
+                self.assertEqual(preset[1], preset_model)
 
     def test_agent_resolves_credential_for_allowed_user(self) -> None:
         agent = AgentConfiguration(
@@ -650,8 +739,7 @@ class StreamEventRecordingTests(TestCase):
         self.assertEqual(self.thread.latest_cost["input_tokens"], 1)
         self.assertEqual(self.thread.latest_cost["cached_input_tokens"], 0)
         self.assertEqual(self.thread.latest_cost["output_tokens"], 2)
-        self.assertEqual(self.thread.latest_cost["usd"], "0")
-        self.assertEqual(self.thread.latest_cost_usd, Decimal("0"))
+        self.assertNotIn("usd", self.thread.latest_cost)
         self.assertEqual(ThreadCostSnapshot.objects.count(), 1)
 
     def test_record_stream_event_persists_standard_token_usage_event(self) -> None:
@@ -691,6 +779,43 @@ class StreamEventRecordingTests(TestCase):
         self.assertEqual(self.thread.latest_cost["model"], "gpt-5.5")
         self.assertEqual(self.thread.latest_cost["input_tokens"], 1)
         self.assertEqual(self.thread.latest_cost["output_tokens"], 2)
+
+    def test_record_stream_event_calculates_cost_lazily_when_model_pricing_exists(
+        self,
+    ) -> None:
+        provider = Provider.objects.get(slug="openai")
+        model = ModelConfiguration.objects.create(name="gpt-5.5", slug="gpt-55")
+        ModelPricing.objects.create(
+            model=model,
+            provider=provider,
+            input_per_million=Decimal("2.00"),
+            cached_input_per_million=Decimal("1.00"),
+            output_per_million=Decimal("10.00"),
+        )
+        self.thread.model = model
+        self.thread.save(update_fields=["model", "updated_at"])
+
+        services._record_stream_event(
+            self.thread.pk,
+            TokenUsage(
+                provider="openai",
+                model="gpt-5.5",
+                source="thread_token_usage_updated",
+                input_tokens=1_000_000,
+                cached_input_tokens=100_000,
+                cache_read_input_tokens=200_000,
+                output_tokens=500_000,
+            ),
+            "fallback-model",
+        )
+
+        event = StreamEvent.objects.get(thread=self.thread)
+        self.thread.refresh_from_db()
+        self.assertNotIn("usd", self.thread.latest_cost)
+        self.assertNotIn("pricing", self.thread.latest_cost)
+        self.assertNotIn("usd", ThreadCostSnapshot.objects.get().usage)
+        payload = views._event_payload(event, thread=self.thread)
+        self.assertEqual(payload["cost_usd"], "7.100000")
 
     def test_record_stream_event_persists_item_termination(self) -> None:
         services._record_stream_event(
@@ -741,10 +866,8 @@ class StreamEventRecordingTests(TestCase):
                 "output_tokens": 5,
                 "reasoning_output_tokens": 0,
                 "total_tokens": 20,
-                "usd": "0",
             },
         )
-        self.assertEqual(self.thread.latest_cost_usd, Decimal("0"))
         self.assertEqual(ThreadCostSnapshot.objects.count(), 1)
 
     def test_record_stream_event_persists_standard_claude_token_usage_event(
@@ -782,7 +905,6 @@ class StreamEventRecordingTests(TestCase):
                 "output_tokens": 5,
                 "reasoning_output_tokens": 0,
                 "total_tokens": 20,
-                "usd": "0",
             },
         )
 
@@ -1246,8 +1368,9 @@ class PublicThreadAccessTests(TestCase):
             fork = Thread.objects.exclude(pk=thread.pk).get()
             self.assertRedirects(response, fork.get_absolute_url())
             self.assertTrue(
-                (target_root / "metadata" / ".codex" / "sessions" / "session.jsonl")
-                .exists()
+                (
+                    target_root / "metadata" / ".codex" / "sessions" / "session.jsonl"
+                ).exists()
             )
             self.assertFalse((target_root / "metadata" / ".codex" / "tmp").exists())
 

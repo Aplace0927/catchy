@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from decimal import Decimal
 from typing import Any, cast
 
 from django.db import migrations
@@ -20,7 +19,9 @@ def normalize_token_usage_records(apps: Any, schema_editor: Any) -> None:
         event_raw: object = getattr(event, "raw", None)
         raw = cast(dict[str, Any], event_raw) if isinstance(event_raw, dict) else {}
         model_name = _model_name(event.thread, raw)
-        normalized = _normalized_event_raw(raw, model_name=model_name, source=event.source)
+        normalized = _normalized_event_raw(
+            raw, model_name=model_name, source=event.source
+        )
         if normalized is None:
             continue
         stream_event_model.objects.filter(pk=event.pk).update(
@@ -45,7 +46,6 @@ def normalize_token_usage_records(apps: Any, schema_editor: Any) -> None:
             continue
         thread_model.objects.filter(pk=thread.pk).update(
             latest_cost=snapshot,
-            latest_cost_usd=Decimal("0"),
         )
 
     for snapshot_record in snapshot_model.objects.select_related(
@@ -67,7 +67,6 @@ def normalize_token_usage_records(apps: Any, schema_editor: Any) -> None:
             continue
         snapshot_model.objects.filter(pk=snapshot_record.pk).update(
             usage=snapshot,
-            usd=Decimal("0"),
         )
 
 
@@ -135,7 +134,6 @@ def _token_usage_snapshot(
         "output_tokens": output_tokens,
         "reasoning_output_tokens": reasoning_output_tokens,
         "total_tokens": total_tokens,
-        "usd": "0",
     }
 
 

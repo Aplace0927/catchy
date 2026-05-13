@@ -80,6 +80,17 @@ class TimeStampedModel(models.Model):
         abstract = True
 
 
+class Provider(TimeStampedModel):
+    name = models.CharField(max_length=120)
+    slug = models.SlugField(max_length=120, unique=True)
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self) -> str:
+        return self.name
+
+
 class Credential(TimeStampedModel):
     class Kind(models.TextChoices):
         ANTHROPIC = "anthropic", "Anthropic API key"
@@ -90,6 +101,13 @@ class Credential(TimeStampedModel):
     name = models.CharField(max_length=200)
     slug = models.SlugField(max_length=200, unique=True)
     kind = models.CharField(max_length=30, choices=Kind.choices, default=Kind.OPENAI)
+    provider = models.ForeignKey(
+        Provider,
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="credentials",
+    )
     api_key = models.TextField()
     base_url = models.URLField(blank=True, default="")
     organization_id = models.CharField(max_length=200, blank=True)
@@ -142,6 +160,65 @@ class ModelConfiguration(TimeStampedModel):
 
     def can_use(self, user: AbstractUser) -> bool:
         return _can_access_grouped_object(user, self.use_groups)
+
+
+class ModelPricing(TimeStampedModel):
+    model = models.ForeignKey(
+        ModelConfiguration,
+        on_delete=models.CASCADE,
+        related_name="pricing",
+    )
+    provider = models.ForeignKey(
+        Provider,
+        on_delete=models.CASCADE,
+        related_name="model_pricing",
+    )
+    input_per_million = models.DecimalField(max_digits=12, decimal_places=6)
+    cached_input_per_million = models.DecimalField(max_digits=12, decimal_places=6)
+    output_per_million = models.DecimalField(max_digits=12, decimal_places=6)
+
+    class Meta:
+        ordering = ["provider__name", "model__name"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["model", "provider"],
+                name="unique_model_pricing_by_model_provider",
+            )
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.provider.slug}:{self.model.name}"
+
+    def estimate_usd(self, usage: dict[str, Any]) -> Decimal:
+        input_tokens = _decimal_token_count(usage.get("input_tokens"))
+        cached_input_tokens = _decimal_token_count(usage.get("cached_input_tokens"))
+        cache_creation_input_tokens = _decimal_token_count(
+            usage.get("cache_creation_input_tokens")
+        )
+        cache_read_input_tokens = _decimal_token_count(
+            usage.get("cache_read_input_tokens")
+        )
+        output_tokens = _decimal_token_count(usage.get("output_tokens"))
+        billable_input_tokens = max(
+            input_tokens + cache_creation_input_tokens - cached_input_tokens,
+            Decimal("0"),
+        )
+        billable_cached_tokens = cached_input_tokens + cache_read_input_tokens
+        usd = (
+            billable_input_tokens * self.input_per_million
+            + billable_cached_tokens * self.cached_input_per_million
+            + output_tokens * self.output_per_million
+        ) / Decimal("1000000")
+        return usd.quantize(Decimal("0.000001"))
+
+    def snapshot(self) -> dict[str, str]:
+        return {
+            "provider": self.provider.slug,
+            "model": self.model.name,
+            "input_per_million": str(self.input_per_million),
+            "cached_input_per_million": str(self.cached_input_per_million),
+            "output_per_million": str(self.output_per_million),
+        }
 
 
 class AgentConfiguration(TimeStampedModel):
@@ -345,9 +422,6 @@ class Thread(TimeStampedModel):
     workspace_path = models.CharField(max_length=500, blank=True)
     metadata_path = models.CharField(max_length=500, blank=True)
     error = models.TextField(blank=True)
-    latest_cost_usd = models.DecimalField(
-        max_digits=12, decimal_places=6, default=Decimal("0")
-    )
     latest_cost = models.JSONField(default=dict, blank=True)
     is_public = models.BooleanField(default=False)
 
@@ -428,7 +502,6 @@ class ThreadCostSnapshot(TimeStampedModel):
     thread = models.ForeignKey(
         Thread, on_delete=models.CASCADE, related_name="cost_snapshots"
     )
-    usd = models.DecimalField(max_digits=12, decimal_places=6, default=Decimal("0"))
     usage = models.JSONField(default=dict, blank=True)
 
     class Meta:
@@ -479,6 +552,18 @@ def _yaml_mapping(value: str) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError("YAML value must resolve to a mapping")
     return {str(key): item for key, item in data.items()}
+
+
+def _decimal_token_count(value: object) -> Decimal:
+    if isinstance(value, bool):
+        return Decimal("0")
+    if isinstance(value, int):
+        return Decimal(value)
+    if isinstance(value, float):
+        return Decimal(str(int(value)))
+    if isinstance(value, str) and value.isdecimal():
+        return Decimal(value)
+    return Decimal("0")
 
 
 def _can_access_grouped_object(

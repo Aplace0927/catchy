@@ -10,7 +10,16 @@ from django.core.files.uploadedfile import UploadedFile
 from django.utils.text import slugify
 from omegaconf import OmegaConf
 
-from .models import AgentConfiguration, Challenge, Credential, Ctf, ModelConfiguration
+from .models import (
+    AgentConfiguration,
+    Challenge,
+    Credential,
+    Ctf,
+    ModelConfiguration,
+    ModelPricing,
+    Provider,
+)
+from .pricing import PRICING_PRESET_BY_KEY, PRICING_PRESETS
 from .source_archives import (
     SOURCE_ARCHIVE_FORMAT_HINT,
     DownloadedSourceArchive,
@@ -26,6 +35,7 @@ class CredentialForm(forms.ModelForm):
             "name",
             "slug",
             "kind",
+            "provider",
             "api_key",
             "base_url",
             "organization_id",
@@ -37,6 +47,7 @@ class CredentialForm(forms.ModelForm):
         }
         help_texts = {
             "api_key": "API key, OAuth token, or raw Codex auth.json depending on the selected kind.",
+            "provider": "Used for matching token usage to pricing. If blank, Catchy infers it from the credential kind.",
             "base_url": "Optional override for API-compatible endpoints.",
             "organization_id": "Only used by OpenAI API key credentials.",
         }
@@ -68,11 +79,114 @@ class CredentialForm(forms.ModelForm):
             raise forms.ValidationError("Codex auth.json must contain a JSON object.")
         return value
 
+    def clean(self) -> dict[str, Any]:
+        cleaned = super().clean()
+        if cleaned.get("provider") is None:
+            provider_slug = _provider_slug_for_credential_kind(cleaned.get("kind"))
+            if provider_slug:
+                cleaned["provider"] = Provider.objects.filter(
+                    slug=provider_slug
+                ).first()
+        return cleaned
+
+
+class ProviderForm(forms.ModelForm):
+    class Meta:
+        model = Provider
+        fields = ["name", "slug"]
+        help_texts = {
+            "slug": "Stable provider identifier used by token usage and pricing events.",
+        }
+
 
 class ModelConfigurationForm(forms.ModelForm):
     class Meta:
         model = ModelConfiguration
         fields = ["name", "slug", "view_groups", "use_groups"]
+
+
+class ModelPricingForm(forms.ModelForm):
+    pricing_preset = forms.ChoiceField(
+        required=False,
+        choices=[("", "Custom pricing")]
+        + [(preset.key, preset.label) for preset in PRICING_PRESETS],
+        help_text="Optional preset. Selecting one fills provider and token rates on save.",
+    )
+
+    class Meta:
+        model = ModelPricing
+        fields = [
+            "model",
+            "provider",
+            "input_per_million",
+            "cached_input_per_million",
+            "output_per_million",
+        ]
+        labels = {
+            "input_per_million": "Input / 1M tokens",
+            "cached_input_per_million": "Cached input / 1M tokens",
+            "output_per_million": "Output / 1M tokens",
+        }
+        help_texts = {
+            "provider": "Provider for this model pricing entry.",
+            "cached_input_per_million": "Use 0 when the provider has no separate cached-input price.",
+        }
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.fields["provider"].required = False
+        for field_name in (
+            "input_per_million",
+            "cached_input_per_million",
+            "output_per_million",
+        ):
+            self.fields[field_name].required = False
+        self.order_fields(
+            [
+                "model",
+                "pricing_preset",
+                "provider",
+                "input_per_million",
+                "cached_input_per_million",
+                "output_per_million",
+            ]
+        )
+
+    def clean(self) -> dict[str, Any]:
+        cleaned = super().clean()
+        preset_key = str(cleaned.get("pricing_preset") or "")
+        if preset_key:
+            preset = PRICING_PRESET_BY_KEY[preset_key]
+            provider = Provider.objects.filter(slug=preset.provider_slug).first()
+            if provider is None:
+                self.add_error(
+                    "pricing_preset",
+                    f"Provider does not exist for preset: {preset.provider_slug}",
+                )
+                return cleaned
+            cleaned["provider"] = provider
+            for field_name, value in preset.as_pricing().items():
+                cleaned[field_name] = value
+            return cleaned
+
+        if cleaned.get("provider") is None:
+            self.add_error("provider", "Select a provider or pricing preset.")
+        for field_name in (
+            "input_per_million",
+            "cached_input_per_million",
+            "output_per_million",
+        ):
+            if cleaned.get(field_name) is None:
+                self.add_error(field_name, "Enter a price or select a pricing preset.")
+        return cleaned
+
+
+def _provider_slug_for_credential_kind(kind: object) -> str:
+    if kind in {Credential.Kind.OPENAI, Credential.Kind.CODEX_AUTH_JSON}:
+        return "openai"
+    if kind in {Credential.Kind.ANTHROPIC, Credential.Kind.CLAUDE_OAUTH_TOKEN}:
+        return "anthropic"
+    return ""
 
 
 class AgentConfigurationForm(forms.ModelForm):

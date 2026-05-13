@@ -21,6 +21,8 @@ from .forms import (
     CredentialForm,
     CtfForm,
     ModelConfigurationForm,
+    ModelPricingForm,
+    ProviderForm,
     ThreadCreateForm,
 )
 from .models import (
@@ -29,11 +31,18 @@ from .models import (
     Credential,
     Ctf,
     ModelConfiguration,
+    ModelPricing,
+    Provider,
     SteeringMessage,
     StreamEvent,
     Thread,
 )
-from .services import build_agent_configuration, fork_thread, start_thread
+from .services import (
+    build_agent_configuration,
+    fork_thread,
+    start_thread,
+    token_usage_cost_usd,
+)
 
 
 class _ChallengeGroup(TypedDict):
@@ -86,7 +95,9 @@ def index(request: HttpRequest) -> HttpResponse:
 def credential_list(request: HttpRequest) -> HttpResponse:
     credentials = [
         credential
-        for credential in Credential.objects.prefetch_related("allowed_groups")
+        for credential in Credential.objects.select_related(
+            "provider"
+        ).prefetch_related("allowed_groups")
         if credential.can_view(request.user)
     ]
     return render(
@@ -135,6 +146,41 @@ def credential_update(request: HttpRequest, slug: str) -> HttpResponse:
 
 
 @login_required
+def provider_list(request: HttpRequest) -> HttpResponse:
+    providers = list(Provider.objects.all())
+    return render(request, "ctf/provider_list.html", {"providers": providers})
+
+
+@login_required
+def provider_create(request: HttpRequest) -> HttpResponse:
+    form = ProviderForm(request.POST or None)
+    if request.method == "POST" and form.is_valid():
+        form.save()
+        messages.success(request, "Provider saved.")
+        return redirect("ctf:provider_list")
+    return render(
+        request,
+        "ctf/form.html",
+        {"form": form, "title": "New provider"},
+    )
+
+
+@login_required
+def provider_update(request: HttpRequest, slug: str) -> HttpResponse:
+    provider = get_object_or_404(Provider, slug=slug)
+    form = ProviderForm(request.POST or None, instance=provider)
+    if request.method == "POST" and form.is_valid():
+        form.save()
+        messages.success(request, "Provider updated.")
+        return redirect("ctf:provider_list")
+    return render(
+        request,
+        "ctf/form.html",
+        {"form": form, "title": f"Edit provider: {provider.name}"},
+    )
+
+
+@login_required
 def model_list(request: HttpRequest) -> HttpResponse:
     models = [
         model
@@ -177,6 +223,55 @@ def model_update(request: HttpRequest, slug: str) -> HttpResponse:
         request,
         "ctf/form.html",
         {"form": form, "title": f"Edit model: {model.name}"},
+    )
+
+
+@login_required
+def pricing_list(request: HttpRequest) -> HttpResponse:
+    pricing = [
+        item
+        for item in ModelPricing.objects.select_related(
+            "model", "provider"
+        ).prefetch_related("model__view_groups")
+        if item.model.can_view(request.user)
+    ]
+    return render(request, "ctf/pricing_list.html", {"pricing": pricing})
+
+
+@login_required
+def pricing_create(request: HttpRequest) -> HttpResponse:
+    form = ModelPricingForm(request.POST or None)
+    if request.method == "POST" and form.is_valid():
+        form.save()
+        messages.success(request, "Model pricing saved.")
+        return redirect("ctf:pricing_list")
+    return render(
+        request,
+        "ctf/form.html",
+        {"form": form, "title": "New model pricing"},
+    )
+
+
+@login_required
+def pricing_update(request: HttpRequest, pk: int) -> HttpResponse:
+    pricing = get_object_or_404(
+        ModelPricing.objects.select_related("model", "provider").prefetch_related(
+            "model__view_groups"
+        ),
+        pk=pk,
+    )
+    if not pricing.model.can_view(request.user):
+        raise PermissionDenied
+
+    form = ModelPricingForm(request.POST or None, instance=pricing)
+    if request.method == "POST" and form.is_valid():
+        form.save()
+        messages.success(request, "Model pricing updated.")
+        return redirect("ctf:pricing_list")
+    return render(
+        request,
+        "ctf/form.html",
+        {"form": form, "title": f"Edit pricing: {pricing}"},
     )
 
 
@@ -425,7 +520,7 @@ def thread_create(
 def thread_detail(request: HttpRequest, pk: int) -> HttpResponse:
     thread = get_object_or_404(
         Thread.objects.select_related(
-            "ctf", "challenge", "agent", "model", "credential"
+            "ctf", "challenge", "agent", "model", "credential", "credential__provider"
         ),
         pk=pk,
     )
@@ -442,13 +537,23 @@ def thread_detail(request: HttpRequest, pk: int) -> HttpResponse:
         Thread.Status.COMPLETED,
     }
     events = list(thread.events.all()[:2000])
+    latest_cost_usd = None
+    latest_cost_raw = thread.latest_cost if isinstance(thread.latest_cost, dict) else {}
+    if latest_cost_raw:
+        model_name = thread.model.name if thread.model is not None else None
+        latest_cost_usd = token_usage_cost_usd(
+            thread,
+            raw=latest_cost_raw,
+            model_name=model_name,
+        )
     return render(
         request,
         "ctf/thread_detail.html",
         {
             "thread": thread,
+            "latest_cost_usd": latest_cost_usd,
             "events": events,
-            "events_json": [_event_payload(event) for event in events],
+            "events_json": [_event_payload(event, thread=thread) for event in events],
             "can_manage_thread": can_manage_thread,
             "can_prompt_thread": can_manage_thread
             and thread.status in promptable_statuses,
@@ -610,12 +715,15 @@ def thread_stream(request: HttpRequest, pk: int) -> HttpResponse:
 
 def _event_stream(thread_id: int, last_sequence: int = 0) -> Iterator[str]:
     while True:
-        thread = Thread.objects.get(pk=thread_id)
+        thread = Thread.objects.select_related(
+            "agent", "model", "credential", "credential__provider", "created_by"
+        ).get(pk=thread_id)
         for event in _events_after(thread_id, last_sequence):
             last_sequence = event.sequence
             yield f"id: {event.sequence}\n"
             yield "event: stream\n"
-            yield f"data: {json.dumps(_event_payload(event), ensure_ascii=False)}\n\n"
+            payload = _event_payload(event, thread=thread)
+            yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
         if thread.status in {
             Thread.Status.WAITING,
@@ -658,8 +766,12 @@ def _events_after(thread_id: int, sequence: int) -> QuerySet[StreamEvent]:
     ).order_by("sequence")
 
 
-def _event_payload(event: StreamEvent) -> dict[str, object]:
-    return {
+def _event_payload(
+    event: StreamEvent,
+    *,
+    thread: Thread | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
         "sequence": event.sequence,
         "source": event.source,
         "kind": event.kind,
@@ -667,6 +779,12 @@ def _event_payload(event: StreamEvent) -> dict[str, object]:
         "raw": event.raw,
         "created_at": event.created_at.isoformat(),
     }
+    if event.kind == "token_count" and thread is not None:
+        model_name = thread.model.name if thread.model is not None else None
+        cost_usd = token_usage_cost_usd(thread, raw=event.raw, model_name=model_name)
+        if cost_usd is not None:
+            payload["cost_usd"] = str(cost_usd)
+    return payload
 
 
 def _nonnegative_int(value: str | None) -> int:

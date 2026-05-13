@@ -124,7 +124,17 @@
       <h2>Timeline</h2>
       <span class="meta"><span id="event-count">0</span> event{{ thread.events.count|pluralize }}</span>
     </div>
-    <div class="timeline" id="timeline"></div>
+    <div style="display:flex; gap:20px; align-items:flex-start;">
+      <div style="flex: 0 0 70%; min-width:0;">
+        <div class="timeline" id="timeline"></div>
+      </div>
+      <aside id="file-tree-pane" style="flex: 0 0 30%; max-height: calc(100vh - 200px); overflow:auto;">
+        <div style="margin-bottom: 8px;">
+          <h3 style="margin:0 0 8px 0; font-size:16px;">Files</h3>
+        </div>
+        <div id="file-tree">Loading file tree…</div>
+      </aside>
+    </div>
   </section>
 
   {{ events_json|json_script:"events-data" }}
@@ -136,6 +146,45 @@
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.5/dist/purify.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/ansi_up@5.2.1/ansi_up.min.js"></script>
   <script>
+    // Fetch and render thread file tree
+    (function () {
+      const pane = document.getElementById('file-tree');
+      if (!pane) return;
+      function renderNode(node) {
+        const li = document.createElement('li');
+        const label = document.createElement('span');
+        label.textContent = node.name || '';
+        label.style.cursor = node.type === 'dir' ? 'pointer' : 'default';
+        li.appendChild(label);
+        if (node.type === 'dir' && Array.isArray(node.children)) {
+          const ul = document.createElement('ul');
+          ul.style.display = 'none';
+          ul.style.listStyle = 'none';
+          ul.style.paddingLeft = '14px';
+          for (const c of node.children) ul.appendChild(renderNode(c));
+          label.addEventListener('click', () => {
+            ul.style.display = ul.style.display === 'none' ? 'block' : 'none';
+          });
+          li.appendChild(ul);
+        }
+        return li;
+      }
+
+      fetch(new URL('{% url "ctf:thread_filetree" thread.pk %}', window.location.origin))
+        .then((r) => r.ok ? r.json() : Promise.reject(r))
+        .then((tree) => {
+          pane.innerHTML = '';
+          const rootUl = document.createElement('ul');
+          rootUl.style.listStyle = 'none';
+          rootUl.style.paddingLeft = '8px';
+          rootUl.appendChild(renderNode(tree));
+          pane.appendChild(rootUl);
+        })
+        .catch((err) => {
+          pane.textContent = 'Unable to load file tree.';
+          console.error('filetree', err);
+        });
+    })();
     (function () {
       const timeline = document.getElementById("timeline");
       const eventCount = document.getElementById("event-count");

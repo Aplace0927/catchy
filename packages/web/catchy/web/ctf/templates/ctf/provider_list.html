@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+
+{% block title %}Providers — Catchy{% endblock %}
+
+{% block content %}
+  <div class="crumbs reveal">
+    <a href="{% url 'ctf:index' %}">Index</a>
+    <span class="sep">/</span>
+    <span class="now">Providers</span>
+  </div>
+
+  <div class="page-head">
+    <div class="title">
+      <h1 class="display reveal" style="margin: 0;">Providers.</h1>
+      <p class="lead reveal" style="margin: 20px 0 0;">
+        Provider identifiers used by credentials and pricing.
+      </p>
+    </div>
+    <div class="actions">
+      <a class="btn btn-primary" href="{% url 'ctf:provider_create' %}">New provider</a>
+    </div>
+  </div>
+
+  <section class="reveal">
+    <div class="section-head">
+      <h2>Index</h2>
+      <span class="meta">{{ providers|length }} provider{{ providers|length|pluralize }}</span>
+    </div>
+    <ul class="idx-list">
+      {% for provider in providers %}
+        <li class="idx-row" onclick="window.location='{% url 'ctf:provider_update' slug=provider.slug %}'">
+          <span class="idx-num">{{ forloop.counter|stringformat:"03d" }}</span>
+          <div class="idx-title">
+            <a href="{% url 'ctf:provider_update' slug=provider.slug %}" class="mono" style="font-size: 17px; color: var(--ink);">{{ provider.name }}</a>
+            <span class="idx-desc"><span class="mono muted">/{{ provider.slug }}</span></span>
+          </div>
+          <span class="idx-meta"></span>
+        </li>
+      {% empty %}
+        <li><div class="empty">No providers yet.</div></li>
+      {% endfor %}
+    </ul>
+  </section>
+{% endblock %}

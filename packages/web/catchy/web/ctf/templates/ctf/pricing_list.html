@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+
+{% block title %}Pricing — Catchy{% endblock %}
+
+{% block content %}
+  <div class="crumbs reveal">
+    <a href="{% url 'ctf:index' %}">Index</a>
+    <span class="sep">/</span>
+    <span class="now">Pricing</span>
+  </div>
+
+  <div class="page-head">
+    <div class="title">
+      <h1 class="display reveal" style="margin: 0;">Pricing.</h1>
+      <p class="lead reveal" style="margin: 20px 0 0;">
+        Token pricing by provider and model.
+      </p>
+    </div>
+    <div class="actions">
+      <a class="btn btn-primary" href="{% url 'ctf:pricing_create' %}">New pricing</a>
+    </div>
+  </div>
+
+  <section class="reveal">
+    <div class="section-head">
+      <h2>Index</h2>
+      <span class="meta">{{ pricing|length }} entr{{ pricing|length|pluralize:"y,ies" }}</span>
+    </div>
+    <ul class="idx-list">
+      {% for item in pricing %}
+        <li class="idx-row" onclick="window.location='{% url 'ctf:pricing_update' pk=item.pk %}'">
+          <span class="idx-num">{{ forloop.counter|stringformat:"03d" }}</span>
+          <div class="idx-title">
+            <a href="{% url 'ctf:pricing_update' pk=item.pk %}" class="mono" style="font-size: 17px; color: var(--ink);">{{ item.provider.slug }} / {{ item.model.name }}</a>
+            <span class="idx-desc">
+              input ${{ item.input_per_million }} · cached ${{ item.cached_input_per_million }} · output ${{ item.output_per_million }} / 1M
+            </span>
+          </div>
+          <span class="idx-meta"></span>
+        </li>
+      {% empty %}
+        <li><div class="empty">No pricing entries yet.</div></li>
+      {% endfor %}
+    </ul>
+  </section>
+{% endblock %}

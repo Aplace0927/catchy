@@ -69,7 +69,7 @@
                   <span class="idx-desc">
                     <span class="mono muted">{{ thread.agent.name }}</span>
                     {% if thread.model %} · <span class="mono muted">{{ thread.model.name }}</span>{% endif %}
-                    {% if thread.credential %} · <span class="mono muted">{{ thread.credential.name }}</span>{% endif %}
+                    {% if thread.can_show_credential %} · <span class="mono muted">{{ thread.credential.name }}</span>{% endif %}
                   </span>
                 {% endif %}
               </div>

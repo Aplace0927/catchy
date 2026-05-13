@@ -38,6 +38,7 @@ from catchy.web.ctf.forms import (
     ModelConfigurationForm,
     ModelPricingForm,
     ProviderForm,
+    ThreadCreateForm,
 )
 from catchy.web.ctf.models import (
     AgentConfiguration,
@@ -461,6 +462,11 @@ class CredentialAgentPermissionTests(TestCase):
 
         self.assertRedirects(response, challenge.get_absolute_url())
         self.assertFalse(Thread.objects.exists())
+
+    def test_thread_create_form_hides_credentials_user_cannot_use(self) -> None:
+        form = ThreadCreateForm(user=self.denied_user)
+
+        self.assertNotIn(self.credential, form.fields["credential"].queryset)
 
 
 class ChallengeSourceFormTests(TestCase):
@@ -1131,6 +1137,53 @@ class PublicThreadAccessTests(TestCase):
         self.assertNotContains(response, "Fork")
         self.assertNotContains(response, 'id="steer-form"')
 
+    def test_thread_detail_hides_credential_name_without_credential_access(
+        self,
+    ) -> None:
+        credential_group = Group.objects.create(name="credential-managers")
+        credential = Credential.objects.create(
+            name="Restricted Credential",
+            slug="restricted-credential",
+            api_key="secret",
+        )
+        credential.allowed_groups.add(credential_group)
+        thread = self._create_thread(
+            "credential-detail",
+            is_public=False,
+            credential=credential,
+        )
+        self.client.force_login(self.user)
+
+        response = self.client.get(thread.get_absolute_url())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, str(thread))
+        self.assertContains(response, 'id="steer-form"')
+        self.assertNotContains(response, "Restricted Credential")
+
+    def test_challenge_detail_hides_credential_name_without_credential_access(
+        self,
+    ) -> None:
+        credential_group = Group.objects.create(name="credential-managers")
+        credential = Credential.objects.create(
+            name="Restricted Credential",
+            slug="restricted-credential",
+            api_key="secret",
+        )
+        credential.allowed_groups.add(credential_group)
+        thread = self._create_thread(
+            "credential-list",
+            is_public=False,
+            credential=credential,
+        )
+        self.client.force_login(self.user)
+
+        response = self.client.get(thread.challenge.get_absolute_url())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, str(thread))
+        self.assertNotContains(response, "Restricted Credential")
+
     def test_user_without_ctf_access_cannot_publish_thread(self) -> None:
         managers = Group.objects.create(name="study-managers")
         self.ctf.view_groups.add(managers)
@@ -1221,6 +1274,35 @@ class PublicThreadAccessTests(TestCase):
             thread.steering_messages.get().kind,
             SteeringMessage.Kind.PROMPT,
         )
+        self.assertEqual(start_thread.call_args.args[0].pk, thread.pk)
+
+    def test_message_to_thread_allows_ctf_access_without_credential_access(
+        self,
+    ) -> None:
+        credential_group = Group.objects.create(name="credential-managers")
+        credential = Credential.objects.create(
+            name="Restricted Credential",
+            slug="restricted-credential",
+            api_key="secret",
+        )
+        credential.allowed_groups.add(credential_group)
+        thread = self._create_thread(
+            "resume-restricted-credential",
+            is_public=False,
+            credential=credential,
+        )
+        thread.thread_root = "/tmp/catchy-existing-thread"
+        thread.save(update_fields=["thread_root", "updated_at"])
+        self.client.force_login(self.user)
+
+        with patch("catchy.web.ctf.views.start_thread") as start_thread:
+            response = self.client.post(
+                reverse("ctf:thread_steer", kwargs={"thread_uuid": thread.uuid}),
+                {"text": "continue"},
+            )
+
+        self.assertRedirects(response, thread.get_absolute_url())
+        self.assertEqual(SteeringMessage.objects.get(thread=thread).text, "continue")
         self.assertEqual(start_thread.call_args.args[0].pk, thread.pk)
 
     def test_message_to_failed_thread_is_rejected(self) -> None:
@@ -1369,6 +1451,28 @@ class PublicThreadAccessTests(TestCase):
             ],
         )
 
+    def test_fork_thread_rejects_user_without_credential_access(self) -> None:
+        credential_group = Group.objects.create(name="credential-managers")
+        credential = Credential.objects.create(
+            name="Restricted Credential",
+            slug="restricted-credential",
+            api_key="secret",
+        )
+        credential.allowed_groups.add(credential_group)
+        thread = self._create_thread(
+            "fork-restricted-credential",
+            is_public=False,
+            credential=credential,
+        )
+        self.client.force_login(self.user)
+
+        response = self.client.post(
+            reverse("ctf:thread_fork", kwargs={"thread_uuid": thread.uuid})
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(Thread.objects.count(), 1)
+
     def test_fork_thread_skips_codex_runtime_tmp_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             source_root = Path(tmp) / "source"
@@ -1465,6 +1569,7 @@ class PublicThreadAccessTests(TestCase):
         *,
         is_public: bool,
         ctf: Ctf | None = None,
+        credential: Credential | None = None,
     ) -> Thread:
         ctf = ctf or self.ctf
         challenge = Challenge.objects.create(
@@ -1476,6 +1581,7 @@ class PublicThreadAccessTests(TestCase):
             ctf=ctf,
             challenge=challenge,
             agent=self.agent,
+            credential=credential,
             status=Thread.Status.COMPLETED,
             is_public=is_public,
         )

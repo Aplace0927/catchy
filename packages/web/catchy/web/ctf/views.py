@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Iterator
-from typing import TypedDict
+from typing import Any, TypedDict
 from uuid import UUID
 
 from django.contrib import messages
@@ -66,17 +66,24 @@ def index(request: HttpRequest) -> HttpResponse:
     thread_filter = Q(is_public=True)
     if request.user.is_authenticated:
         thread_filter |= Q(ctf_id__in=ctf_ids)
-    threads = (
+    threads = _attach_credential_visibility(
         Thread.objects.select_related(
             "ctf", "challenge", "agent", "model", "credential"
         )
+        .prefetch_related("credential__allowed_groups")
         .filter(thread_filter)
-        .distinct()[:20]
+        .distinct()[:20],
+        request.user,
     )
     public_thread_groups = _group_threads_by_ctf_and_challenge(
-        Thread.objects.select_related(
-            "ctf", "challenge", "agent", "model", "credential"
-        ).filter(is_public=True)[:40]
+        _attach_credential_visibility(
+            Thread.objects.select_related(
+                "ctf", "challenge", "agent", "model", "credential"
+            )
+            .prefetch_related("credential__allowed_groups")
+            .filter(is_public=True)[:40],
+            request.user,
+        )
     )
     public_thread_count = sum(group["thread_count"] for group in public_thread_groups)
     return render(
@@ -458,7 +465,12 @@ def challenge_detail(
         {
             "ctf": ctf,
             "challenge": challenge,
-            "threads": challenge.threads.select_related("agent", "model", "credential"),
+            "threads": _attach_credential_visibility(
+                challenge.threads.select_related(
+                    "agent", "model", "credential"
+                ).prefetch_related("credential__allowed_groups"),
+                request.user,
+            ),
             "thread_form": thread_form,
             "can_init": ctf.can_init_thread(request.user),
         },
@@ -487,7 +499,7 @@ def thread_create(
     if not model.can_use(request.user):
         raise PermissionDenied
     credential = form.cleaned_data["credential"]
-    if not credential.can_view(request.user):
+    if not credential.can_use(request.user):
         raise PermissionDenied
 
     try:
@@ -521,10 +533,11 @@ def thread_detail(request: HttpRequest, thread_uuid: UUID) -> HttpResponse:
     thread = get_object_or_404(
         Thread.objects.select_related(
             "ctf", "challenge", "agent", "model", "credential", "credential__provider"
-        ),
+        ).prefetch_related("credential__allowed_groups"),
         uuid=thread_uuid,
     )
     can_manage_thread = thread.can_interact(request.user)
+    _attach_credential_visibility([thread], request.user)
     promptable_statuses = {
         Thread.Status.QUEUED,
         Thread.Status.RUNNING,
@@ -684,6 +697,8 @@ def thread_fork(request: HttpRequest, thread_uuid: UUID) -> HttpResponse:
     )
     if not thread.can_interact(request.user):
         raise PermissionDenied
+    if thread.credential is not None and not thread.credential.can_use(request.user):
+        raise PermissionDenied
 
     fork = fork_thread(thread, user=request.user)
     messages.success(request, "Thread forked.")
@@ -730,7 +745,7 @@ def _event_stream(thread_id: int, last_sequence: int = 0) -> Iterator[str]:
 
 
 def _group_threads_by_ctf_and_challenge(
-    threads: QuerySet[Thread],
+    threads: QuerySet[Thread] | list[Thread],
 ) -> list[_ThreadGroup]:
     groups: list[_ThreadGroup] = []
     group_by_ctf_id: dict[int, _ThreadGroup] = {}
@@ -750,6 +765,19 @@ def _group_threads_by_ctf_and_challenge(
         challenge_group["threads"].append(thread)
         ctf_group["thread_count"] += 1
     return groups
+
+
+def _attach_credential_visibility(
+    threads: QuerySet[Thread] | list[Thread],
+    user: Any,
+) -> list[Thread]:
+    marked_threads = list(threads)
+    for thread in marked_threads:
+        credential = thread.credential
+        thread.can_show_credential = (
+            credential is not None and credential.can_view(user)
+        )
+    return marked_threads
 
 
 def _events_after(thread_id: int, sequence: int) -> QuerySet[StreamEvent]:

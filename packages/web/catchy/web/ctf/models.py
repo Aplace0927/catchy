@@ -132,6 +132,9 @@ class Credential(TimeStampedModel):
     def can_view(self, user: AbstractUser) -> bool:
         return _can_access_grouped_object(user, self.allowed_groups)
 
+    def can_use(self, user: AbstractUser) -> bool:
+        return self.can_view(user)
+
 
 class ModelConfiguration(TimeStampedModel):
     name = models.CharField(max_length=200)

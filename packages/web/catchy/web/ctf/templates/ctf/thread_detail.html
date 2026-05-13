@@ -40,7 +40,7 @@
         {% if thread.model %}
           <span class="muted" style="font-size: 13px;">model · {{ thread.model.name }}</span>
         {% endif %}
-        {% if thread.credential %}
+        {% if thread.can_show_credential %}
           <span class="muted" style="font-size: 13px;">credential · {{ thread.credential.name }}</span>
         {% endif %}
         {% if latest_cost_usd != None %}

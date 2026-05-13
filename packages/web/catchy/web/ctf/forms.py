@@ -473,7 +473,7 @@ class ThreadCreateForm(forms.Form):
         credential_ids = [
             credential.pk
             for credential in Credential.objects.prefetch_related("allowed_groups")
-            if credential.can_view(user)
+            if credential.can_use(user)
         ]
         self.fields["credential"].queryset = Credential.objects.filter(
             pk__in=credential_ids

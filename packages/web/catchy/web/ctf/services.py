@@ -271,7 +271,7 @@ def build_agent_configuration(
         raise ValueError("credential is required")
     if user is not None and not model_configuration.can_use(user):
         raise PermissionDenied("model configuration is not accessible")
-    if user is not None and not credential.can_view(user):
+    if user is not None and not credential.can_use(user):
         raise PermissionDenied("credential is not accessible")
     existing_model = data.get("model", {})
     model_data = (

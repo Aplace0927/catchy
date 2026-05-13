@@ -1107,13 +1107,44 @@ class PublicThreadAccessTests(TestCase):
         self.assertNotContains(response, "Publish")
         self.assertNotContains(response, "Steer</button>")
 
-    def test_anonymous_private_thread_redirects_to_login(self) -> None:
+    def test_anonymous_can_view_private_thread_readonly(self) -> None:
         thread = self._create_thread("private-detail", is_public=False)
 
         response = self.client.get(thread.get_absolute_url())
 
-        self.assertEqual(response.status_code, 302)
-        self.assertIn("/accounts/login/", response["Location"])
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, str(thread))
+        self.assertNotContains(response, "Publish")
+        self.assertNotContains(response, 'id="steer-form"')
+
+    def test_user_without_ctf_access_views_thread_readonly(self) -> None:
+        managers = Group.objects.create(name="study-managers")
+        self.ctf.view_groups.add(managers)
+        thread = self._create_thread("restricted-detail", is_public=False)
+        self.client.force_login(self.user)
+
+        response = self.client.get(thread.get_absolute_url())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, str(thread))
+        self.assertNotContains(response, "Publish")
+        self.assertNotContains(response, "Fork")
+        self.assertNotContains(response, 'id="steer-form"')
+
+    def test_user_without_ctf_access_cannot_publish_thread(self) -> None:
+        managers = Group.objects.create(name="study-managers")
+        self.ctf.view_groups.add(managers)
+        thread = self._create_thread("restricted-publish", is_public=False)
+        self.client.force_login(self.user)
+
+        response = self.client.post(
+            reverse("ctf:thread_publish", kwargs={"thread_uuid": thread.uuid}),
+            {"is_public": "1"},
+        )
+
+        thread.refresh_from_db()
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(thread.is_public)
 
     def test_published_thread_detail_shows_unpublish_button(self) -> None:
         thread = self._create_thread("published", is_public=True)
@@ -1151,7 +1182,7 @@ class PublicThreadAccessTests(TestCase):
         self.client.force_login(self.user)
 
         response = self.client.post(
-            reverse("ctf:thread_publish", kwargs={"pk": thread.pk}),
+            reverse("ctf:thread_publish", kwargs={"thread_uuid": thread.uuid}),
             {"is_public": "1"},
         )
         thread.refresh_from_db()
@@ -1159,7 +1190,7 @@ class PublicThreadAccessTests(TestCase):
         self.assertTrue(thread.is_public)
 
         response = self.client.post(
-            reverse("ctf:thread_publish", kwargs={"pk": thread.pk}),
+            reverse("ctf:thread_publish", kwargs={"thread_uuid": thread.uuid}),
             {"is_public": "0"},
         )
         thread.refresh_from_db()
@@ -1177,7 +1208,7 @@ class PublicThreadAccessTests(TestCase):
 
         with patch("catchy.web.ctf.views.start_thread") as start_thread:
             response = self.client.post(
-                reverse("ctf:thread_steer", kwargs={"pk": thread.pk}),
+                reverse("ctf:thread_steer", kwargs={"thread_uuid": thread.uuid}),
                 {"text": "try the other path"},
             )
 
@@ -1202,7 +1233,7 @@ class PublicThreadAccessTests(TestCase):
 
         with patch("catchy.web.ctf.views.start_thread") as start_thread:
             response = self.client.post(
-                reverse("ctf:thread_steer", kwargs={"pk": thread.pk}),
+                reverse("ctf:thread_steer", kwargs={"thread_uuid": thread.uuid}),
                 {"text": "try again"},
             )
 
@@ -1221,7 +1252,7 @@ class PublicThreadAccessTests(TestCase):
 
         with patch("catchy.web.ctf.views.start_thread") as start_thread:
             response = self.client.post(
-                reverse("ctf:thread_steer", kwargs={"pk": thread.pk}),
+                reverse("ctf:thread_steer", kwargs={"thread_uuid": thread.uuid}),
                 {"text": "keep going"},
             )
 
@@ -1245,7 +1276,7 @@ class PublicThreadAccessTests(TestCase):
 
         with patch("catchy.web.ctf.views.start_thread") as start_thread:
             response = self.client.post(
-                reverse("ctf:thread_steer", kwargs={"pk": thread.pk}),
+                reverse("ctf:thread_steer", kwargs={"thread_uuid": thread.uuid}),
                 {"text": "use this as the turn prompt"},
             )
 
@@ -1265,7 +1296,7 @@ class PublicThreadAccessTests(TestCase):
         self.client.force_login(self.user)
 
         response = self.client.post(
-            reverse("ctf:thread_stop", kwargs={"pk": thread.pk})
+            reverse("ctf:thread_stop", kwargs={"thread_uuid": thread.uuid})
         )
 
         thread.refresh_from_db()
@@ -1283,7 +1314,7 @@ class PublicThreadAccessTests(TestCase):
         self.client.force_login(self.user)
 
         response = self.client.post(
-            reverse("ctf:thread_stop", kwargs={"pk": thread.pk})
+            reverse("ctf:thread_stop", kwargs={"thread_uuid": thread.uuid})
         )
 
         thread.refresh_from_db()
@@ -1320,7 +1351,7 @@ class PublicThreadAccessTests(TestCase):
             with patch("catchy.web.ctf.services._thread_root") as thread_root:
                 thread_root.return_value = target_root
                 response = self.client.post(
-                    reverse("ctf:thread_fork", kwargs={"pk": thread.pk})
+                    reverse("ctf:thread_fork", kwargs={"thread_uuid": thread.uuid})
                 )
 
             fork = Thread.objects.exclude(pk=thread.pk).get()
@@ -1360,7 +1391,7 @@ class PublicThreadAccessTests(TestCase):
                 with patch("catchy.web.ctf.services._thread_root") as thread_root:
                     thread_root.return_value = target_root
                     response = self.client.post(
-                        reverse("ctf:thread_fork", kwargs={"pk": thread.pk})
+                        reverse("ctf:thread_fork", kwargs={"thread_uuid": thread.uuid})
                     )
             finally:
                 inaccessible.chmod(0o700)
@@ -1394,7 +1425,7 @@ class PublicThreadAccessTests(TestCase):
         )
 
         response = self.client.get(
-            reverse("ctf:thread_stream", kwargs={"pk": thread.pk}),
+            reverse("ctf:thread_stream", kwargs={"thread_uuid": thread.uuid}),
             {"after": "1"},
         )
         body = b"".join(response.streaming_content).decode()
@@ -1417,7 +1448,7 @@ class PublicThreadAccessTests(TestCase):
             )
 
         response = self.client.get(
-            reverse("ctf:thread_stream", kwargs={"pk": thread.pk}),
+            reverse("ctf:thread_stream", kwargs={"thread_uuid": thread.uuid}),
             {"after": "1"},
             headers={"Last-Event-ID": "2"},
         )

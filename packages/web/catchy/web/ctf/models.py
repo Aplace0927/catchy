@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import secrets
+import uuid
 from contextlib import contextmanager
 from contextvars import ContextVar
 from decimal import Decimal
@@ -385,6 +386,7 @@ class Thread(TimeStampedModel):
         COMPLETED = "completed", "Completed"
         FAILED = "failed", "Failed"
 
+    uuid = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
     ctf = models.ForeignKey(Ctf, on_delete=models.CASCADE, related_name="threads")
     challenge = models.ForeignKey(
         Challenge, on_delete=models.PROTECT, related_name="threads"
@@ -441,17 +443,20 @@ class Thread(TimeStampedModel):
         super().save(*args, **kwargs)
 
     def get_absolute_url(self) -> str:
-        return reverse("ctf:thread_detail", kwargs={"pk": self.pk})
+        return reverse("ctf:thread_detail", kwargs={"thread_uuid": self.uuid})
 
     @property
     def metadata_directory(self) -> Path | None:
         return Path(self.metadata_path) if self.metadata_path else None
 
     def can_view(self, user: AbstractUser) -> bool:
-        return self.is_public or self.ctf.can_view(user)
+        return True
+
+    def can_interact(self, user: AbstractUser) -> bool:
+        return self.ctf.can_view(user)
 
     def can_publish(self, user: AbstractUser) -> bool:
-        return self.ctf.can_view(user)
+        return self.can_interact(user)
 
 
 class StreamEvent(TimeStampedModel):

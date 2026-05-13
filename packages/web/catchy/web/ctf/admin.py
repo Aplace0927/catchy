@@ -74,6 +74,7 @@ class ChallengeAdmin(admin.ModelAdmin):
 class ThreadAdmin(admin.ModelAdmin):
     list_display = [
         "id",
+        "uuid",
         "name",
         "ctf",
         "challenge",
@@ -84,7 +85,7 @@ class ThreadAdmin(admin.ModelAdmin):
         "is_public",
     ]
     list_filter = ["status", "is_public", "ctf", "agent", "model", "credential"]
-    search_fields = ["name", "challenge__challenge_id", "ctf__title"]
+    search_fields = ["uuid", "name", "challenge__challenge_id", "ctf__title"]
 
 
 @admin.register(StreamEvent)

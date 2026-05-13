@@ -4,10 +4,10 @@ import json
 import time
 from collections.abc import Iterator
 from typing import TypedDict
+from uuid import UUID
 
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
-from django.contrib.auth.views import redirect_to_login
 from django.core.exceptions import PermissionDenied
 from django.db.models import Q, QuerySet
 from django.http import HttpRequest, HttpResponse, StreamingHttpResponse
@@ -517,18 +517,14 @@ def thread_create(
     return redirect(thread)
 
 
-def thread_detail(request: HttpRequest, pk: int) -> HttpResponse:
+def thread_detail(request: HttpRequest, thread_uuid: UUID) -> HttpResponse:
     thread = get_object_or_404(
         Thread.objects.select_related(
             "ctf", "challenge", "agent", "model", "credential", "credential__provider"
         ),
-        pk=pk,
+        uuid=thread_uuid,
     )
-    if not thread.can_view(request.user):
-        if not request.user.is_authenticated:
-            return redirect_to_login(request.get_full_path())
-        raise PermissionDenied
-    can_manage_thread = thread.ctf.can_view(request.user)
+    can_manage_thread = thread.can_interact(request.user)
     promptable_statuses = {
         Thread.Status.QUEUED,
         Thread.Status.RUNNING,
@@ -563,8 +559,8 @@ def thread_detail(request: HttpRequest, pk: int) -> HttpResponse:
 
 @login_required
 @require_POST
-def thread_publish(request: HttpRequest, pk: int) -> HttpResponse:
-    thread = get_object_or_404(Thread.objects.select_related("ctf"), pk=pk)
+def thread_publish(request: HttpRequest, thread_uuid: UUID) -> HttpResponse:
+    thread = get_object_or_404(Thread.objects.select_related("ctf"), uuid=thread_uuid)
     if not thread.can_publish(request.user):
         raise PermissionDenied
 
@@ -579,9 +575,9 @@ def thread_publish(request: HttpRequest, pk: int) -> HttpResponse:
 
 @login_required
 @require_POST
-def thread_steer(request: HttpRequest, pk: int) -> HttpResponse:
-    thread = get_object_or_404(Thread.objects.select_related("ctf"), pk=pk)
-    if not thread.ctf.can_view(request.user):
+def thread_steer(request: HttpRequest, thread_uuid: UUID) -> HttpResponse:
+    thread = get_object_or_404(Thread.objects.select_related("ctf"), uuid=thread_uuid)
+    if not thread.can_interact(request.user):
         raise PermissionDenied
 
     text = request.POST.get("text", "").strip()
@@ -631,9 +627,9 @@ def thread_steer(request: HttpRequest, pk: int) -> HttpResponse:
 
 @login_required
 @require_POST
-def thread_stop(request: HttpRequest, pk: int) -> HttpResponse:
-    thread = get_object_or_404(Thread.objects.select_related("ctf"), pk=pk)
-    if not thread.ctf.can_view(request.user):
+def thread_stop(request: HttpRequest, thread_uuid: UUID) -> HttpResponse:
+    thread = get_object_or_404(Thread.objects.select_related("ctf"), uuid=thread_uuid)
+    if not thread.can_interact(request.user):
         raise PermissionDenied
 
     active_statuses = {Thread.Status.QUEUED, Thread.Status.RUNNING}
@@ -679,14 +675,14 @@ def thread_stop(request: HttpRequest, pk: int) -> HttpResponse:
 
 @login_required
 @require_POST
-def thread_fork(request: HttpRequest, pk: int) -> HttpResponse:
+def thread_fork(request: HttpRequest, thread_uuid: UUID) -> HttpResponse:
     thread = get_object_or_404(
         Thread.objects.select_related(
             "ctf", "challenge", "agent", "model", "credential", "created_by"
         ),
-        pk=pk,
+        uuid=thread_uuid,
     )
-    if not thread.ctf.can_view(request.user):
+    if not thread.can_interact(request.user):
         raise PermissionDenied
 
     fork = fork_thread(thread, user=request.user)
@@ -694,12 +690,8 @@ def thread_fork(request: HttpRequest, pk: int) -> HttpResponse:
     return redirect(fork)
 
 
-def thread_stream(request: HttpRequest, pk: int) -> HttpResponse:
-    thread = get_object_or_404(Thread.objects.select_related("ctf"), pk=pk)
-    if not thread.can_view(request.user):
-        if not request.user.is_authenticated:
-            return redirect_to_login(request.get_full_path())
-        raise PermissionDenied
+def thread_stream(request: HttpRequest, thread_uuid: UUID) -> HttpResponse:
+    thread = get_object_or_404(Thread.objects.select_related("ctf"), uuid=thread_uuid)
     last_sequence = max(
         _nonnegative_int(request.GET.get("after")),
         _nonnegative_int(request.headers.get("Last-Event-ID")),

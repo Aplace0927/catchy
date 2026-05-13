@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}Thread #{{ thread.pk }} — Catchy{% endblock %}
+{% block title %}Thread {{ thread.uuid }} — Catchy{% endblock %}
 
 {% block content %}
   <div class="crumbs reveal">
@@ -18,13 +18,13 @@
       <span>{{ thread.challenge.challenge_id }}</span>
     {% endif %}
     <span class="sep">/</span>
-    <span class="now">#{{ thread.pk }}</span>
+    <span class="now">{{ thread.uuid }}</span>
   </div>
 
   <div class="page-head">
     <div class="title">
       <div class="muted" style="font-size: 13px; margin-bottom: 12px;">
-        Thread · <span class="mono">#{{ thread.pk }}</span>
+        Thread · <span class="mono">{{ thread.uuid }}</span>
       </div>
       <h1 class="display reveal" style="margin: 0;">{{ thread }}</h1>
       <div class="row" style="margin-top: 18px;">
@@ -50,7 +50,7 @@
     </div>
     <div class="actions">
       {% if can_manage_thread %}
-        <form action="{% url 'ctf:thread_publish' thread.pk %}" method="post" style="margin: 0;">
+        <form action="{% url 'ctf:thread_publish' thread.uuid %}" method="post" style="margin: 0;">
           {% csrf_token %}
           {% if thread.is_public %}
             <input type="hidden" name="is_public" value="0">
@@ -77,17 +77,17 @@
   {% if can_manage_thread %}
     <div class="thread-floating">
       <div class="thread-floating-actions">
-        <form action="{% url 'ctf:thread_fork' thread.pk %}" method="post">
+        <form action="{% url 'ctf:thread_fork' thread.uuid %}" method="post">
           {% csrf_token %}
           <button type="submit" class="thread-floating-btn">Fork</button>
         </form>
-        <form action="{% url 'ctf:thread_stop' thread.pk %}" method="post">
+        <form action="{% url 'ctf:thread_stop' thread.uuid %}" method="post">
           {% csrf_token %}
           <button type="submit" class="thread-floating-btn">Stop</button>
         </form>
       </div>
       {% if can_prompt_thread %}
-        <form class="steer-floating" id="steer-form" action="{% url 'ctf:thread_steer' thread.pk %}" method="post">
+        <form class="steer-floating" id="steer-form" action="{% url 'ctf:thread_steer' thread.uuid %}" method="post">
           {% csrf_token %}
           <textarea name="text" rows="1" required placeholder="message the thread…" id="steer-text"></textarea>
           <button type="submit" class="steer-send" aria-label="Send" title="Send">↑</button>
@@ -517,7 +517,7 @@
       const initial = JSON.parse(document.getElementById("events-data").textContent || "[]");
       for (const ev of initial) renderEvent(ev);
 
-      const streamUrl = new URL("{% url 'ctf:thread_stream' thread.pk %}", window.location.origin);
+      const streamUrl = new URL("{% url 'ctf:thread_stream' thread.uuid %}", window.location.origin);
       streamUrl.searchParams.set("after", String(lastSequenceSeen));
       const sse = new EventSource(streamUrl.toString());
 

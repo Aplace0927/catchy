@@ -39,6 +39,7 @@ from .models import (
 )
 from .services import (
     build_agent_configuration,
+    cached_token_usage_cost_usd,
     fork_thread,
     start_thread,
     token_usage_cost_usd,
@@ -66,25 +67,39 @@ def index(request: HttpRequest) -> HttpResponse:
     thread_filter = Q(is_public=True)
     if request.user.is_authenticated:
         thread_filter |= Q(ctf_id__in=ctf_ids)
-    threads = _attach_credential_visibility(
-        Thread.objects.select_related(
-            "ctf", "challenge", "agent", "model", "credential"
-        )
-        .prefetch_related("credential__allowed_groups", "credential__allowed_users")
-        .filter(thread_filter)
-        .distinct()[:20],
-        request.user,
-    )
-    public_thread_groups = _group_threads_by_ctf_and_challenge(
+    threads = _attach_thread_costs(
         _attach_credential_visibility(
             Thread.objects.select_related(
-                "ctf", "challenge", "agent", "model", "credential"
+                "ctf",
+                "challenge",
+                "agent",
+                "model",
+                "credential",
+                "credential__provider",
             )
-            .prefetch_related(
-                "credential__allowed_groups", "credential__allowed_users"
-            )
-            .filter(is_public=True)[:40],
+            .prefetch_related("credential__allowed_groups", "credential__allowed_users")
+            .filter(thread_filter)
+            .distinct()[:20],
             request.user,
+        )
+    )
+    public_thread_groups = _group_threads_by_ctf_and_challenge(
+        _attach_thread_costs(
+            _attach_credential_visibility(
+                Thread.objects.select_related(
+                    "ctf",
+                    "challenge",
+                    "agent",
+                    "model",
+                    "credential",
+                    "credential__provider",
+                )
+                .prefetch_related(
+                    "credential__allowed_groups", "credential__allowed_users"
+                )
+                .filter(is_public=True)[:40],
+                request.user,
+            )
         )
     )
     public_thread_count = sum(group["thread_count"] for group in public_thread_groups)
@@ -461,20 +476,23 @@ def challenge_detail(
         raise PermissionDenied
 
     thread_form = ThreadCreateForm(user=request.user)
+    threads = _attach_thread_costs(
+        _attach_credential_visibility(
+            challenge.threads.select_related(
+                "agent", "model", "credential", "credential__provider"
+            ).prefetch_related(
+                "credential__allowed_groups", "credential__allowed_users"
+            ),
+            request.user,
+        )
+    )
     return render(
         request,
         "ctf/challenge_detail.html",
         {
             "ctf": ctf,
             "challenge": challenge,
-            "threads": _attach_credential_visibility(
-                challenge.threads.select_related(
-                    "agent", "model", "credential"
-                ).prefetch_related(
-                    "credential__allowed_groups", "credential__allowed_users"
-                ),
-                request.user,
-            ),
+            "threads": threads,
             "thread_form": thread_form,
             "can_init": ctf.can_init_thread(request.user),
         },
@@ -550,15 +568,8 @@ def thread_detail(request: HttpRequest, thread_uuid: UUID) -> HttpResponse:
         Thread.Status.COMPLETED,
     }
     events = list(thread.events.all()[:2000])
-    latest_cost_usd = None
-    latest_cost_raw = thread.latest_cost if isinstance(thread.latest_cost, dict) else {}
-    if latest_cost_raw:
-        model_name = thread.model.name if thread.model is not None else None
-        latest_cost_usd = token_usage_cost_usd(
-            thread,
-            raw=latest_cost_raw,
-            model_name=model_name,
-        )
+    model_name = thread.model.name if thread.model is not None else None
+    latest_cost_usd = cached_token_usage_cost_usd(thread, model_name=model_name)
     return render(
         request,
         "ctf/thread_detail.html",
@@ -780,6 +791,17 @@ def _attach_credential_visibility(
         credential = thread.credential
         thread.can_show_credential = (
             credential is not None and credential.can_view(user)
+        )
+    return marked_threads
+
+
+def _attach_thread_costs(threads: QuerySet[Thread] | list[Thread]) -> list[Thread]:
+    marked_threads = list(threads)
+    for thread in marked_threads:
+        model_name = thread.model.name if thread.model is not None else None
+        thread.latest_cost_usd = cached_token_usage_cost_usd(
+            thread,
+            model_name=model_name,
         )
     return marked_threads
 

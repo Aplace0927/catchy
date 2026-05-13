@@ -74,6 +74,7 @@
                 {% endif %}
               </div>
               <span class="idx-meta">
+                {% if thread.latest_cost_usd != None %}<span class="mono muted">${{ thread.latest_cost_usd }}</span>{% endif %}
                 <span class="status status-{{ thread.status }}">{{ thread.status }}</span>
               </span>
               

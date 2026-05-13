@@ -6,7 +6,7 @@ import json
 import shutil
 import threading
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, cast
 
@@ -46,6 +46,7 @@ from .models import (
 from .source_archives import safe_extract_archive
 
 _CODEX_RUNTIME_METADATA_DIRS = frozenset({".tmp", "tmp"})
+THREAD_COST_USD_KEY = "cost_usd"
 
 
 def start_thread(thread: Thread) -> Any:
@@ -584,6 +585,13 @@ def _record_token_usage_snapshot(
         return
     snapshot.pop("pricing", None)
     snapshot.pop("usd", None)
+    cost_usd = token_usage_cost_usd(
+        thread,
+        raw=snapshot,
+        model_name=str(snapshot.get("model") or model_name),
+    )
+    if cost_usd is not None:
+        snapshot[THREAD_COST_USD_KEY] = str(cost_usd)
     thread.latest_cost = snapshot
     thread.save(update_fields=["latest_cost", "updated_at"])
     ThreadCostSnapshot.objects.create(
@@ -622,6 +630,34 @@ def token_usage_cost_usd(
     if pricing is None:
         return None
     return pricing.estimate_usd(snapshot)
+
+
+def cached_token_usage_cost_usd(
+    thread: Thread,
+    *,
+    model_name: str | None = None,
+    persist: bool = True,
+) -> Decimal | None:
+    latest_cost = thread.latest_cost if isinstance(thread.latest_cost, dict) else {}
+    if not latest_cost:
+        return None
+
+    cached_cost = _decimal_cost(latest_cost.get(THREAD_COST_USD_KEY))
+    if cached_cost is not None:
+        return cached_cost
+
+    cost_usd = token_usage_cost_usd(
+        thread,
+        raw=latest_cost,
+        model_name=model_name,
+    )
+    if cost_usd is None:
+        return None
+    if persist:
+        cached_latest_cost = {**latest_cost, THREAD_COST_USD_KEY: str(cost_usd)}
+        Thread.objects.filter(pk=thread.pk).update(latest_cost=cached_latest_cost)
+        thread.latest_cost = cached_latest_cost
+    return cost_usd
 
 
 def _token_usage_snapshot(
@@ -671,6 +707,15 @@ def _token_usage_snapshot(
         "reasoning_output_tokens": reasoning_output_tokens,
         "total_tokens": total_tokens,
     }
+
+
+def _decimal_cost(value: object) -> Decimal | None:
+    if isinstance(value, bool) or value is None or value == "":
+        return None
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
 
 
 def _model_pricing_for_snapshot(

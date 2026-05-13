@@ -1142,6 +1142,39 @@ class PublicThreadAccessTests(TestCase):
             },
         )
 
+    def test_dashboard_thread_list_shows_and_caches_latest_cost(self) -> None:
+        provider, _created = Provider.objects.get_or_create(
+            slug="openai",
+            defaults={"name": "OpenAI"},
+        )
+        model = ModelConfiguration.objects.create(name="gpt-5.5", slug="gpt-55")
+        ModelPricing.objects.create(
+            model=model,
+            provider=provider,
+            input_per_million=Decimal("2.00"),
+            cached_input_per_million=Decimal("1.00"),
+            output_per_million=Decimal("10.00"),
+        )
+        thread = self._create_thread("priced-public", is_public=True)
+        thread.model = model
+        thread.latest_cost = {
+            "provider": "openai",
+            "model": "gpt-5.5",
+            "input_tokens": 1_000_000,
+            "cached_input_tokens": 100_000,
+            "cache_read_input_tokens": 200_000,
+            "output_tokens": 500_000,
+            "total_tokens": 1_700_000,
+        }
+        thread.save(update_fields=["model", "latest_cost", "updated_at"])
+
+        response = self.client.get(reverse("ctf:index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "$7.100000")
+        thread.refresh_from_db()
+        self.assertEqual(thread.latest_cost["cost_usd"], "7.100000")
+
     def test_anonymous_can_view_public_thread(self) -> None:
         thread = self._create_thread("public-detail", is_public=True)
 

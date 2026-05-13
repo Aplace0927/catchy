@@ -13,6 +13,7 @@ import threading
 import tomllib
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -135,6 +136,53 @@ def test_invalid_runtime_codex_config_raises_toml_decode_error() -> None:
         agent._read_container_toml(  # pyright: ignore[reportPrivateUsage]
             container, "/metadata/.codex/config.toml"
         )
+
+
+def test_codex_agent_resumes_existing_thread_without_source_filter() -> None:
+    agent = object.__new__(CodexAgent)
+    setattr(agent, "_id", "codex-test")
+    setattr(agent, "_model_name", "gpt-5.5")
+    setattr(agent, "_container_workspace_directory", "/workspace")
+    codex = _FakeCodexAppServer([SimpleNamespace(id="thread-1")])
+
+    thread = asyncio.run(
+        agent._resume_or_start_thread(  # pyright: ignore[reportPrivateUsage]
+            codex, "challenge-1"
+        )
+    )
+
+    assert thread.id == "resumed-thread-1"
+    assert codex.thread_list_kwargs == {
+        "archived": False,
+        "cwd": "/workspace",
+    }
+    assert codex.resumed_thread_ids == ["thread-1"]
+    assert codex.started_threads == []
+
+
+def test_codex_agent_starts_thread_when_no_existing_thread() -> None:
+    agent = object.__new__(CodexAgent)
+    setattr(agent, "_id", "codex-test")
+    setattr(agent, "_model_name", "gpt-5.5")
+    setattr(agent, "_container_workspace_directory", "/workspace")
+    codex = _FakeCodexAppServer([])
+
+    thread = asyncio.run(
+        agent._resume_or_start_thread(  # pyright: ignore[reportPrivateUsage]
+            codex, "challenge-1"
+        )
+    )
+
+    assert thread.id == "started-thread"
+    assert codex.resumed_thread_ids == []
+    assert codex.started_threads == [
+        {
+            "model": "gpt-5.5",
+            "cwd": "/workspace",
+            "service_name": "catchy",
+            "config": {},
+        }
+    ]
 
 
 def test_codex_notification_yields_agent_and_reasoning_deltas() -> None:
@@ -391,6 +439,29 @@ class _FakeContainer:
                 assert file is not None
                 self.files[member.name] = file.read().decode()
         return True
+
+
+class _FakeCodexAppServer:
+    def __init__(self, threads: list[Any]) -> None:
+        self._threads = threads
+        self.thread_list_kwargs: dict[str, Any] = {}
+        self.resumed_thread_ids: list[str] = []
+        self.started_threads: list[dict[str, Any]] = []
+
+    async def thread_list(self, **kwargs: Any) -> Any:
+        self.thread_list_kwargs = {
+            key: getattr(value, "root", value) if key == "cwd" else value
+            for key, value in kwargs.items()
+        }
+        return SimpleNamespace(data=self._threads)
+
+    async def thread_resume(self, thread_id: str) -> Any:
+        self.resumed_thread_ids.append(thread_id)
+        return SimpleNamespace(id=f"resumed-{thread_id}")
+
+    async def thread_start(self, **kwargs: Any) -> Any:
+        self.started_threads.append(kwargs)
+        return SimpleNamespace(id="started-thread")
 
 
 class _DockerSocketProxy:

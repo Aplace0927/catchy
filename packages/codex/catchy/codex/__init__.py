@@ -46,7 +46,6 @@ from codex_app_server.generated.v2_all import (
     ReasoningTextDeltaNotification,
     TerminalInteractionNotification,
     ThreadListCwdFilter,
-    ThreadSourceKind,
     ThreadTokenUsageUpdatedNotification,
     TurnDiffUpdatedNotification,
     TurnCompletedNotification,
@@ -358,31 +357,7 @@ class CodexAgent(Agent):
                     experimental_api=True,
                 )
             ) as codex:
-                threads = (
-                    await codex.thread_list(
-                        cwd=ThreadListCwdFilter(self._container_workspace_directory),
-                        source_kinds=[ThreadSourceKind.app_server],
-                    )
-                ).data
-
-                match threads:
-                    case [thread]:
-                        _LOGGER.info(
-                            f"({self.id})({challenge.id}) Resuming existing thread: {thread.id}"
-                        )
-                        thread = await codex.thread_resume(thread.id)
-                    case []:
-                        _LOGGER.info(f"({self.id})({challenge.id}) Starting new thread")
-                        thread = await codex.thread_start(
-                            model=self._model_name,
-                            cwd=self._container_workspace_directory,
-                            service_name="catchy",
-                            config={},  # TODO: support custom model config
-                        )
-                    case _:
-                        raise RuntimeError(
-                            f"Expected at most one thread, but found {len(threads)}"
-                        )
+                thread = await self._resume_or_start_thread(codex, challenge.id)
 
                 default_prompt = Template(self._user_prompt_template).render(
                     challenge=challenge,
@@ -420,6 +395,33 @@ class CodexAgent(Agent):
 
                         if restart_turn:
                             break
+
+    async def _resume_or_start_thread(self, codex: Any, challenge_id: str) -> Any:
+        threads = (
+            await codex.thread_list(
+                archived=False,
+                cwd=ThreadListCwdFilter(self._container_workspace_directory),
+            )
+        ).data
+
+        match threads:
+            case [thread]:
+                _LOGGER.info(
+                    f"({self.id})({challenge_id}) Resuming existing thread: {thread.id}"
+                )
+                return await codex.thread_resume(thread.id)
+            case []:
+                _LOGGER.info(f"({self.id})({challenge_id}) Starting new thread")
+                return await codex.thread_start(
+                    model=self._model_name,
+                    cwd=self._container_workspace_directory,
+                    service_name="catchy",
+                    config={},  # TODO: support custom model config
+                )
+            case _:
+                raise RuntimeError(
+                    f"Expected at most one thread, but found {len(threads)}"
+                )
 
     @contextmanager
     def _docker_container(

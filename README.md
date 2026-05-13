@@ -11,7 +11,7 @@ Autonomous AI agent runner for capture-the-flag challenges.
 <br/>
 <br/>
 
-<img src="assets/app.png" alt="Catchy app" width="900" />
+<img src="assets/web.png" alt="Catchy web" width="900" />
 
 </div>
 

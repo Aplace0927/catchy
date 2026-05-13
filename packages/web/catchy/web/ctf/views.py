@@ -553,11 +553,6 @@ def thread_create(
     return redirect(thread)
 
 
-def thread_detail_legacy(request: HttpRequest, pk: int) -> HttpResponse:
-    thread = get_object_or_404(Thread.objects.select_related("ctf"), pk=pk)
-    return redirect(thread)
-
-
 def thread_detail(request: HttpRequest, thread_uuid: UUID) -> HttpResponse:
     thread = get_object_or_404(
         Thread.objects.select_related(

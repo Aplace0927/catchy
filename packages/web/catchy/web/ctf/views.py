@@ -759,6 +759,7 @@ def _event_stream(thread_id: int, last_sequence: int = 0) -> Iterator[str]:
             Thread.Status.COMPLETED,
             Thread.Status.FAILED,
         }:
+            yield "retry: 5000\n"
             yield "event: status\n"
             yield f"data: {json.dumps({'status': thread.status, 'error': thread.error}, ensure_ascii=False)}\n\n"
             return

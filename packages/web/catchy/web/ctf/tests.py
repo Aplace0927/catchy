@@ -1683,6 +1683,20 @@ class PublicThreadAccessTests(TestCase):
         self.assertIn("id: 3", body)
         self.assertIn('"sequence": 3', body)
 
+    def test_thread_stream_status_advertises_reconnect_retry(self) -> None:
+        thread = self._create_thread("stream-waiting-retry", is_public=True)
+        thread.status = Thread.Status.WAITING
+        thread.save(update_fields=["status", "updated_at"])
+
+        response = self.client.get(
+            reverse("ctf:thread_stream", kwargs={"thread_uuid": thread.uuid})
+        )
+        body = b"".join(response.streaming_content).decode()
+
+        self.assertIn("retry: 5000", body)
+        self.assertIn("event: status", body)
+        self.assertIn('"status": "waiting"', body)
+
     def _create_thread(
         self,
         challenge_id: str,

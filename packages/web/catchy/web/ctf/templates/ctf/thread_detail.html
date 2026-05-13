@@ -532,7 +532,9 @@
         statusNode.textContent = payload.status;
         applyStatusClass(payload.status);
         applyPromptAvailability(payload.status);
-        sse.close();
+        if (!promptableStatuses.has(payload.status || "")) {
+          sse.close();
+        }
       });
     })();
   </script>

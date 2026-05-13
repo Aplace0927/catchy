@@ -40,6 +40,7 @@ class CredentialForm(forms.ModelForm):
             "base_url",
             "organization_id",
             "allowed_groups",
+            "allowed_users",
         ]
         labels = {
             "api_key": "Secret",
@@ -472,7 +473,9 @@ class ThreadCreateForm(forms.Form):
         )
         credential_ids = [
             credential.pk
-            for credential in Credential.objects.prefetch_related("allowed_groups")
+            for credential in Credential.objects.prefetch_related(
+                "allowed_groups", "allowed_users"
+            )
             if credential.can_use(user)
         ]
         self.fields["credential"].queryset = Credential.objects.filter(

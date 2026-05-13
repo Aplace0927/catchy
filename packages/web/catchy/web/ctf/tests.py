@@ -67,6 +67,10 @@ class CredentialAgentPermissionTests(TestCase):
             password="password",
         )
         self.allowed_user.groups.add(self.allowed_group)
+        self.direct_user = User.objects.create_user(
+            username="direct",
+            password="password",
+        )
         self.denied_user = User.objects.create_user(
             username="denied",
             password="password",
@@ -77,6 +81,19 @@ class CredentialAgentPermissionTests(TestCase):
             api_key="top-secret",
         )
         self.credential.allowed_groups.add(self.allowed_group)
+
+    def test_credential_access_allows_group_or_user(self) -> None:
+        user_credential = Credential.objects.create(
+            name="Direct Token",
+            slug="direct-token",
+            api_key="direct-secret",
+        )
+        user_credential.allowed_users.add(self.direct_user)
+
+        self.assertTrue(self.credential.can_view(self.allowed_user))
+        self.assertFalse(self.credential.can_view(self.direct_user))
+        self.assertTrue(user_credential.can_view(self.direct_user))
+        self.assertFalse(user_credential.can_view(self.denied_user))
 
     def test_credential_name_accepts_non_slug_text(self) -> None:
         form = CredentialForm(
@@ -197,6 +214,17 @@ class CredentialAgentPermissionTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 403)
+
+    def test_credential_update_allows_direct_user(self) -> None:
+        self.credential.allowed_users.add(self.direct_user)
+        self.client.force_login(self.direct_user)
+
+        response = self.client.get(
+            reverse("ctf:credential_update", kwargs={"slug": self.credential.slug})
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Edit credential")
 
     def test_model_name_accepts_non_slug_text(self) -> None:
         form = ModelConfigurationForm(
@@ -467,6 +495,18 @@ class CredentialAgentPermissionTests(TestCase):
         form = ThreadCreateForm(user=self.denied_user)
 
         self.assertNotIn(self.credential, form.fields["credential"].queryset)
+
+    def test_thread_create_form_includes_direct_user_credential(self) -> None:
+        credential = Credential.objects.create(
+            name="Direct Token",
+            slug="direct-token",
+            api_key="direct-secret",
+        )
+        credential.allowed_users.add(self.direct_user)
+
+        form = ThreadCreateForm(user=self.direct_user)
+
+        self.assertIn(credential, form.fields["credential"].queryset)
 
 
 class ChallengeSourceFormTests(TestCase):

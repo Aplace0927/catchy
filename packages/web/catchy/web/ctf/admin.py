@@ -26,7 +26,7 @@ class CredentialAdmin(admin.ModelAdmin):
     list_display = ["name", "slug", "kind", "provider", "base_url", "created_at"]
     search_fields = ["name", "slug", "kind", "base_url", "organization_id"]
     list_filter = ["provider", "kind"]
-    filter_horizontal = ["allowed_groups"]
+    filter_horizontal = ["allowed_groups", "allowed_users"]
 
 
 @admin.register(ModelConfiguration)

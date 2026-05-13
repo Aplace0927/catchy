@@ -138,7 +138,10 @@ def run_thread_sync(thread_id: int) -> None:
         )
         .select_related("created_by")
         .prefetch_related(
-            "agent__use_groups", "model__use_groups", "credential__allowed_groups"
+            "agent__use_groups",
+            "model__use_groups",
+            "credential__allowed_groups",
+            "credential__allowed_users",
         )
         .get(pk=thread_id)
     )

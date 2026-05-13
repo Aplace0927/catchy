@@ -115,6 +115,11 @@ class Credential(TimeStampedModel):
     allowed_groups = models.ManyToManyField(
         Group, blank=True, related_name="credentials"
     )
+    allowed_users = models.ManyToManyField(
+        django_settings.AUTH_USER_MODEL,
+        blank=True,
+        related_name="credentials",
+    )
     created_by = models.ForeignKey(
         django_settings.AUTH_USER_MODEL,
         null=True,
@@ -130,7 +135,18 @@ class Credential(TimeStampedModel):
         return self.name
 
     def can_view(self, user: AbstractUser) -> bool:
-        return _can_access_grouped_object(user, self.allowed_groups)
+        if not user.is_authenticated:
+            return False
+        if user.is_superuser:
+            return True
+
+        allowed_user_ids = set(self.allowed_users.values_list("id", flat=True))
+        allowed_group_ids = set(self.allowed_groups.values_list("id", flat=True))
+        if not allowed_user_ids and not allowed_group_ids:
+            return True
+        if user.pk in allowed_user_ids:
+            return True
+        return user.groups.filter(id__in=allowed_group_ids).exists()
 
     def can_use(self, user: AbstractUser) -> bool:
         return self.can_view(user)
@@ -535,7 +551,9 @@ def _resolve_credential(name: str) -> str:
     if user is None:
         raise PermissionDenied("credential resolver requires an authenticated user")
 
-    credential = Credential.objects.prefetch_related("allowed_groups").get(slug=name)
+    credential = Credential.objects.prefetch_related(
+        "allowed_groups", "allowed_users"
+    ).get(slug=name)
     if not credential.can_view(user):
         raise PermissionDenied(f"credential is not accessible: {name}")
     return credential.api_key

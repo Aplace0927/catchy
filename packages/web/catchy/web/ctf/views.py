@@ -70,7 +70,7 @@ def index(request: HttpRequest) -> HttpResponse:
         Thread.objects.select_related(
             "ctf", "challenge", "agent", "model", "credential"
         )
-        .prefetch_related("credential__allowed_groups")
+        .prefetch_related("credential__allowed_groups", "credential__allowed_users")
         .filter(thread_filter)
         .distinct()[:20],
         request.user,
@@ -80,7 +80,9 @@ def index(request: HttpRequest) -> HttpResponse:
             Thread.objects.select_related(
                 "ctf", "challenge", "agent", "model", "credential"
             )
-            .prefetch_related("credential__allowed_groups")
+            .prefetch_related(
+                "credential__allowed_groups", "credential__allowed_users"
+            )
             .filter(is_public=True)[:40],
             request.user,
         )
@@ -104,7 +106,7 @@ def credential_list(request: HttpRequest) -> HttpResponse:
         credential
         for credential in Credential.objects.select_related(
             "provider"
-        ).prefetch_related("allowed_groups")
+        ).prefetch_related("allowed_groups", "allowed_users")
         if credential.can_view(request.user)
     ]
     return render(
@@ -134,7 +136,7 @@ def credential_create(request: HttpRequest) -> HttpResponse:
 @login_required
 def credential_update(request: HttpRequest, slug: str) -> HttpResponse:
     credential = get_object_or_404(
-        Credential.objects.prefetch_related("allowed_groups"),
+        Credential.objects.prefetch_related("allowed_groups", "allowed_users"),
         slug=slug,
     )
     if not credential.can_view(request.user):
@@ -468,7 +470,9 @@ def challenge_detail(
             "threads": _attach_credential_visibility(
                 challenge.threads.select_related(
                     "agent", "model", "credential"
-                ).prefetch_related("credential__allowed_groups"),
+                ).prefetch_related(
+                    "credential__allowed_groups", "credential__allowed_users"
+                ),
                 request.user,
             ),
             "thread_form": thread_form,
@@ -533,7 +537,7 @@ def thread_detail(request: HttpRequest, thread_uuid: UUID) -> HttpResponse:
     thread = get_object_or_404(
         Thread.objects.select_related(
             "ctf", "challenge", "agent", "model", "credential", "credential__provider"
-        ).prefetch_related("credential__allowed_groups"),
+        ).prefetch_related("credential__allowed_groups", "credential__allowed_users"),
         uuid=thread_uuid,
     )
     can_manage_thread = thread.can_interact(request.user)

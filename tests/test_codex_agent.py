@@ -20,7 +20,13 @@ from docker import DockerClient
 from docker.errors import DockerException
 
 from catchy.codex import CodexAgent
-from catchy.core.agents.models import Chunk, ItemCompleted, Log, TurnCompleted
+from catchy.core.agents.models import (
+    Chunk,
+    ItemCompleted,
+    Log,
+    TokenUsage,
+    TurnCompleted,
+)
 from catchy.core.challenge.models import Challenge
 from codex_app_server.generated.v2_all import (
     AgentMessageDeltaNotification,
@@ -326,8 +332,13 @@ def test_codex_notification_yields_structured_log_events() -> None:
     ]
     assert len(usage_events) == 1
     usage = usage_events[0]
-    assert isinstance(usage, Log)
-    assert usage.kind == "token_count"
+    assert isinstance(usage, TokenUsage)
+    assert usage.provider == "openai"
+    assert usage.source == "thread_token_usage_updated"
+    assert usage.input_tokens == 5
+    assert usage.cached_input_tokens == 1
+    assert usage.output_tokens == 3
+    assert usage.total_tokens == 8
     token_usage = cast(dict[str, Any], usage.raw["tokenUsage"])
     total = cast(dict[str, Any], token_usage["total"])
     assert total["inputTokens"] == 5

@@ -2,15 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import json
 import shutil
 import threading
 from datetime import datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, cast
 
 from asgiref.sync import sync_to_async
-from catchy.codex import TokenUsage, estimate_cost
 from catchy.core.agents.models import (
     Chunk,
     Event,
@@ -21,6 +21,7 @@ from catchy.core.agents.models import (
     Prompt,
     Steer,
     Stop,
+    TokenUsage,
     TurnCompleted,
 )
 from catchy.core.agents.protocols import Agent
@@ -414,18 +415,26 @@ def _record_stream_event(thread_id: int, event: Event, model_name: str) -> None:
                 raw=raw,
             )
             if log.kind == "token_count":
-                if raw.get("provider") == "anthropic":
-                    _record_claude_token_usage_snapshot(
-                        thread,
-                        model_name=model_name,
-                        raw=raw,
-                    )
-                else:
-                    _record_token_usage_snapshot(
-                        thread,
-                        model_name=model_name,
-                        raw=raw,
-                    )
+                _record_token_usage_snapshot(
+                    thread,
+                    model_name=model_name,
+                    raw=raw,
+                )
+        case TokenUsage() as usage:
+            raw = usage.event_raw()
+            text = json.dumps(raw["usage"], separators=(",", ":"))
+            _record_event(
+                thread,
+                source="agent_stream",
+                kind="token_count",
+                text=text,
+                raw=raw,
+            )
+            _record_token_usage_snapshot(
+                thread,
+                model_name=usage.model or model_name,
+                raw=raw,
+            )
         case ItemCompleted():
             _record_event(
                 thread,
@@ -478,33 +487,6 @@ def _pop_next_thread_command(thread_id: int) -> Interrupt:
         raw={"steering_message_id": message.pk},
     )
     return interrupt
-
-
-def _claude_usage_snapshot(
-    usage: dict[str, Any],
-    *,
-    model_name: str,
-) -> dict[str, Any]:
-    input_tokens = _int_value(usage.get("input_tokens"))
-    cache_creation_input_tokens = _int_value(usage.get("cache_creation_input_tokens"))
-    cache_read_input_tokens = _int_value(usage.get("cache_read_input_tokens"))
-    output_tokens = _int_value(usage.get("output_tokens"))
-    total_tokens = (
-        input_tokens
-        + cache_creation_input_tokens
-        + cache_read_input_tokens
-        + output_tokens
-    )
-    return {
-        "provider": "anthropic",
-        "model": model_name,
-        "input_tokens": input_tokens,
-        "cache_creation_input_tokens": cache_creation_input_tokens,
-        "cache_read_input_tokens": cache_read_input_tokens,
-        "output_tokens": output_tokens,
-        "total_tokens": total_tokens,
-        "usd": "0",
-    }
 
 
 def _int_value(value: object) -> int:
@@ -588,36 +570,10 @@ def _record_token_usage_snapshot(
     model_name: str,
     raw: dict[str, Any],
 ) -> None:
-    usage = _token_usage_from_raw(raw)
-    if usage is None:
+    snapshot = _token_usage_snapshot(raw, model_name=model_name)
+    if snapshot is None:
         return
-    estimate = estimate_cost(model_name, usage)
-    thread.latest_cost_usd = estimate.usd
-    thread.latest_cost = estimate.as_dict()
-    thread.save(update_fields=["latest_cost_usd", "latest_cost", "updated_at"])
-    ThreadCostSnapshot.objects.create(
-        thread=thread,
-        usd=estimate.usd,
-        usage=estimate.as_dict(),
-    )
-
-
-def _record_claude_token_usage_snapshot(
-    thread: Thread,
-    *,
-    model_name: str,
-    raw: dict[str, Any],
-) -> None:
-    usage = _claude_usage_from_raw(raw)
-    if usage is None:
-        return
-    snapshot = _claude_usage_snapshot(usage, model_name=model_name)
-    cost_usd = _decimal_value(raw.get("cost_usd") or raw.get("total_cost_usd"))
-    if cost_usd is not None:
-        snapshot["usd"] = str(cost_usd)
-        thread.latest_cost_usd = cost_usd
-    else:
-        thread.latest_cost_usd = Decimal("0")
+    thread.latest_cost_usd = Decimal("0")
     thread.latest_cost = snapshot
     thread.save(update_fields=["latest_cost_usd", "latest_cost", "updated_at"])
     ThreadCostSnapshot.objects.create(
@@ -627,21 +583,54 @@ def _record_claude_token_usage_snapshot(
     )
 
 
-def _claude_usage_from_raw(raw: dict[str, Any]) -> dict[str, Any] | None:
-    payload = _first_dict(raw.get("payload"), raw.get("message"), raw)
-    usage = _first_dict(
-        payload.get("usage"),
-        payload.get("info"),
-        raw.get("usage"),
-        raw.get("info"),
-        payload,
-    )
-    if not usage:
+def _token_usage_snapshot(
+    raw: dict[str, Any],
+    *,
+    model_name: str,
+) -> dict[str, Any] | None:
+    usage = _token_usage_from_raw(raw)
+    if usage is None:
         return None
-    return {str(key): value for key, value in usage.items()}
+    input_tokens = _int_value(usage.get("input_tokens") or usage.get("inputTokens"))
+    cached_input_tokens = _int_value(
+        usage.get("cached_input_tokens") or usage.get("cachedInputTokens")
+    )
+    cache_creation_input_tokens = _int_value(
+        usage.get("cache_creation_input_tokens")
+        or usage.get("cacheCreationInputTokens")
+    )
+    cache_read_input_tokens = _int_value(
+        usage.get("cache_read_input_tokens") or usage.get("cacheReadInputTokens")
+    )
+    output_tokens = _int_value(usage.get("output_tokens") or usage.get("outputTokens"))
+    reasoning_output_tokens = _int_value(
+        usage.get("reasoning_output_tokens") or usage.get("reasoningOutputTokens")
+    )
+    total_tokens = _int_value(usage.get("total_tokens") or usage.get("totalTokens"))
+    if not total_tokens:
+        total_tokens = (
+            input_tokens
+            + cache_creation_input_tokens
+            + cache_read_input_tokens
+            + output_tokens
+        )
+    provider = raw.get("provider")
+    model = raw.get("model")
+    return {
+        "provider": provider if isinstance(provider, str) and provider else "openai",
+        "model": model if isinstance(model, str) and model else model_name,
+        "input_tokens": input_tokens,
+        "cached_input_tokens": cached_input_tokens,
+        "cache_creation_input_tokens": cache_creation_input_tokens,
+        "cache_read_input_tokens": cache_read_input_tokens,
+        "output_tokens": output_tokens,
+        "reasoning_output_tokens": reasoning_output_tokens,
+        "total_tokens": total_tokens,
+        "usd": "0",
+    }
 
 
-def _token_usage_from_raw(raw: dict[str, Any]) -> TokenUsage | None:
+def _token_usage_from_raw(raw: dict[str, Any]) -> dict[str, Any] | None:
     payload = _first_dict(raw.get("payload"), raw.get("message"), raw)
     info = _first_dict(
         payload.get("info"),
@@ -661,15 +650,7 @@ def _token_usage_from_raw(raw: dict[str, Any]) -> TokenUsage | None:
     )
     if not usage:
         return None
-    return TokenUsage(
-        input_tokens=_int_value(usage.get("input_tokens") or usage.get("inputTokens")),
-        cached_input_tokens=_int_value(
-            usage.get("cached_input_tokens") or usage.get("cachedInputTokens")
-        ),
-        output_tokens=_int_value(
-            usage.get("output_tokens") or usage.get("outputTokens")
-        ),
-    )
+    return {str(key): value for key, value in usage.items()}
 
 
 def _first_dict(*values: object) -> dict[str, Any]:
@@ -677,15 +658,6 @@ def _first_dict(*values: object) -> dict[str, Any]:
         if isinstance(value, dict):
             return value
     return {}
-
-
-def _decimal_value(value: object) -> Decimal | None:
-    if isinstance(value, bool) or value is None:
-        return None
-    try:
-        return Decimal(str(value)).quantize(Decimal("0.000001"))
-    except (InvalidOperation, ValueError):
-        return None
 
 
 def _fork_thread_name(thread: Thread) -> str:

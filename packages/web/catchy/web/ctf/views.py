@@ -3,10 +3,8 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Iterator
-from decimal import Decimal, InvalidOperation
-from typing import Any, TypedDict
+from typing import TypedDict
 
-from catchy.codex import TokenUsage, estimate_cost
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.views import redirect_to_login
@@ -450,10 +448,7 @@ def thread_detail(request: HttpRequest, pk: int) -> HttpResponse:
         {
             "thread": thread,
             "events": events,
-            "events_json": [
-                _event_payload(event, cost_model=_thread_cost_model(thread))
-                for event in events
-            ],
+            "events_json": [_event_payload(event) for event in events],
             "can_manage_thread": can_manage_thread,
             "can_prompt_thread": can_manage_thread
             and thread.status in promptable_statuses,
@@ -620,10 +615,7 @@ def _event_stream(thread_id: int, last_sequence: int = 0) -> Iterator[str]:
             last_sequence = event.sequence
             yield f"id: {event.sequence}\n"
             yield "event: stream\n"
-            yield f"data: {json.dumps(_event_payload(event, cost_model=_thread_cost_model(thread)), ensure_ascii=False)}\n\n"
-
-        yield "event: cost\n"
-        yield f"data: {json.dumps({'cost': thread.latest_cost}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps(_event_payload(event), ensure_ascii=False)}\n\n"
 
         if thread.status in {
             Thread.Status.WAITING,
@@ -666,104 +658,15 @@ def _events_after(thread_id: int, sequence: int) -> QuerySet[StreamEvent]:
     ).order_by("sequence")
 
 
-def _event_payload(
-    event: StreamEvent, *, cost_model: str | None = None
-) -> dict[str, object]:
-    cost_usd = _event_cost_usd(event, cost_model=cost_model)
+def _event_payload(event: StreamEvent) -> dict[str, object]:
     return {
         "sequence": event.sequence,
         "source": event.source,
         "kind": event.kind,
         "text": event.text,
         "raw": event.raw,
-        "cost_usd": str(cost_usd) if cost_usd is not None else None,
         "created_at": event.created_at.isoformat(),
     }
-
-
-def _event_cost_usd(event: StreamEvent, *, cost_model: str | None) -> object | None:
-    if event.kind == "token_count" and event.raw.get("provider") == "anthropic":
-        return _decimal_value(event.raw.get("cost_usd") or event.raw.get("total_cost_usd"))
-    if (
-        not cost_model
-        or event.kind != "token_count"
-        or event.source not in {"agent_stream", "codex_jsonl"}
-    ):
-        return None
-    usage = _token_count_total_usage(event.raw)
-    if usage is None:
-        return None
-    return estimate_cost(cost_model, usage).usd
-
-
-def _decimal_value(value: object) -> Decimal | None:
-    if isinstance(value, bool) or value is None:
-        return None
-    try:
-        return Decimal(str(value)).quantize(Decimal("0.000001"))
-    except (InvalidOperation, ValueError):
-        return None
-
-
-def _token_count_total_usage(raw: dict[str, Any]) -> TokenUsage | None:
-    payload = _first_dict(raw.get("payload"), raw.get("message"), raw)
-    info = _first_dict(
-        payload.get("info"),
-        payload.get("usage"),
-        payload.get("tokenUsage"),
-        raw.get("info"),
-        raw.get("usage"),
-        raw.get("tokenUsage"),
-        payload,
-    )
-    usage = _first_dict(
-        info.get("total_token_usage"),
-        info.get("last_token_usage"),
-        info.get("total"),
-        info.get("last"),
-        info,
-    )
-    if not isinstance(usage, dict):
-        return None
-    return TokenUsage(
-        input_tokens=_int_value(usage.get("input_tokens") or usage.get("inputTokens")),
-        cached_input_tokens=_int_value(
-            usage.get("cached_input_tokens") or usage.get("cachedInputTokens")
-        ),
-        output_tokens=_int_value(
-            usage.get("output_tokens") or usage.get("outputTokens")
-        ),
-    )
-
-
-def _first_dict(*values: object) -> dict[str, Any]:
-    for value in values:
-        if isinstance(value, dict):
-            return value
-    return {}
-
-
-def _int_value(value: object) -> int:
-    if isinstance(value, bool):
-        return 0
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float):
-        return int(value)
-    if isinstance(value, str) and value.isdecimal():
-        return int(value)
-    return 0
-
-
-def _thread_cost_model(thread: Thread) -> str | None:
-    latest_cost = thread.latest_cost
-    if isinstance(latest_cost, dict):
-        model = latest_cost.get("model")
-        if isinstance(model, str) and model:
-            return model
-    if thread.model_id and thread.model is not None:
-        return thread.model.name
-    return None
 
 
 def _nonnegative_int(value: str | None) -> int:

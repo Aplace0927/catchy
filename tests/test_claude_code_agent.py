@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from catchy.claude_code import ClaudeCodeAgent
-from catchy.core.agents.models import Chunk, ItemCompleted, Log, Nop, TurnCompleted
+from catchy.core.agents.models import Chunk, ItemCompleted, Nop, TokenUsage, TurnCompleted
 from claude_agent_sdk import ResultMessage, StreamEvent
 
 
@@ -235,7 +235,7 @@ def test_claude_stream_event_handles_ping_and_signature_delta() -> None:
     assert isinstance(signature, Nop)
 
 
-def test_claude_stream_event_yields_token_usage_logs() -> None:
+def test_claude_stream_event_yields_token_usage_events() -> None:
     agent = object.__new__(ClaudeCodeAgent)
 
     start_events = agent._events_from_stream_event(  # pyright: ignore[reportPrivateUsage]
@@ -271,12 +271,13 @@ def test_claude_stream_event_yields_token_usage_logs() -> None:
     )
 
     assert start_events == [
-        Log(
-            kind="token_count",
-            text='{"input_tokens": 10, "cache_read_input_tokens": 2, "output_tokens": 1}',
+        TokenUsage(
+            provider="anthropic",
+            source="stream_event",
+            input_tokens=10,
+            cache_read_input_tokens=2,
+            output_tokens=1,
             raw={
-                "provider": "anthropic",
-                "source": "stream_event",
                 "event_type": "message_start",
                 "session_id": "session-1",
                 "usage": {
@@ -288,12 +289,13 @@ def test_claude_stream_event_yields_token_usage_logs() -> None:
         )
     ]
     assert delta_events == [
-        Log(
-            kind="token_count",
-            text='{"input_tokens": 10, "cache_read_input_tokens": 2, "output_tokens": 5}',
+        TokenUsage(
+            provider="anthropic",
+            source="stream_event",
+            input_tokens=10,
+            cache_read_input_tokens=2,
+            output_tokens=5,
             raw={
-                "provider": "anthropic",
-                "source": "stream_event",
                 "event_type": "message_delta",
                 "session_id": "session-1",
                 "usage": {
@@ -307,7 +309,7 @@ def test_claude_stream_event_yields_token_usage_logs() -> None:
     ]
 
 
-def test_claude_result_message_yields_usage_log_before_turn_completed() -> None:
+def test_claude_result_message_yields_usage_event_before_turn_completed() -> None:
     agent = object.__new__(ClaudeCodeAgent)
 
     events = agent._events_from_message(  # pyright: ignore[reportPrivateUsage]
@@ -319,7 +321,6 @@ def test_claude_result_message_yields_usage_log_before_turn_completed() -> None:
             num_turns=1,
             session_id="session-1",
             stop_reason="end_turn",
-            total_cost_usd=0.123456,
             usage={
                 "input_tokens": 10,
                 "cache_creation_input_tokens": 3,
@@ -330,12 +331,14 @@ def test_claude_result_message_yields_usage_log_before_turn_completed() -> None:
     )
 
     assert events == [
-        Log(
-            kind="token_count",
-            text='{"input_tokens": 10, "cache_creation_input_tokens": 3, "cache_read_input_tokens": 2, "output_tokens": 5}',
+        TokenUsage(
+            provider="anthropic",
+            source="result_message",
+            input_tokens=10,
+            cache_creation_input_tokens=3,
+            cache_read_input_tokens=2,
+            output_tokens=5,
             raw={
-                "provider": "anthropic",
-                "source": "result_message",
                 "subtype": "success",
                 "session_id": "session-1",
                 "duration_ms": 1200,
@@ -348,7 +351,6 @@ def test_claude_result_message_yields_usage_log_before_turn_completed() -> None:
                     "output_tokens": 5,
                 },
                 "stop_reason": "end_turn",
-                "cost_usd": 0.123456,
             },
         ),
         TurnCompleted(),

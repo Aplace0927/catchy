@@ -7,7 +7,6 @@ import shlex
 import tarfile
 import tomllib
 from contextlib import contextmanager
-from decimal import Decimal
 from pathlib import Path
 from typing import Any, AsyncGenerator, Literal, cast
 
@@ -22,6 +21,7 @@ from catchy.core.agents.models import (
     Prompt,
     Steer,
     Stop,
+    TokenUsage,
     TurnCompleted,
 )
 from catchy.core.agents.protocols import Agent
@@ -67,232 +67,6 @@ from pydantic import (
 )
 
 _LOGGER = logging.getLogger(__name__)
-
-
-class TokenUsage(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    input_tokens: int = 0
-    cached_input_tokens: int = 0
-    output_tokens: int = 0
-
-    @field_validator(
-        "input_tokens", "cached_input_tokens", "output_tokens", mode="before"
-    )
-    @classmethod
-    def _deserialize_token_count(cls, value: object) -> int:
-        return _int_value(value)
-
-    @property
-    def billable_input_tokens(self) -> int:
-        return max(self.input_tokens - self.cached_input_tokens, 0)
-
-    @property
-    def total_tokens(self) -> int:
-        return self.input_tokens + self.output_tokens
-
-    def __add__(self, other: "TokenUsage") -> "TokenUsage":
-        return TokenUsage(
-            input_tokens=self.input_tokens + other.input_tokens,
-            cached_input_tokens=self.cached_input_tokens + other.cached_input_tokens,
-            output_tokens=self.output_tokens + other.output_tokens,
-        )
-
-
-class ModelPricing(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    input_per_million: Decimal
-    cached_input_per_million: Decimal
-    output_per_million: Decimal
-
-
-class CostEstimate(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    model: str
-    usage: TokenUsage
-    usd: Decimal
-    pricing: ModelPricing | None
-
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "model": self.model,
-            "input_tokens": self.usage.input_tokens,
-            "cached_input_tokens": self.usage.cached_input_tokens,
-            "output_tokens": self.usage.output_tokens,
-            "total_tokens": self.usage.total_tokens,
-            "usd": str(self.usd),
-            "pricing": None
-            if self.pricing is None
-            else {
-                "input_per_million": str(self.pricing.input_per_million),
-                "cached_input_per_million": str(self.pricing.cached_input_per_million),
-                "output_per_million": str(self.pricing.output_per_million),
-            },
-        }
-
-
-def _pricing(
-    input_per_million: str,
-    cached_input_per_million: str | None,
-    output_per_million: str,
-) -> ModelPricing:
-    input_price = Decimal(input_per_million)
-    return ModelPricing(
-        input_per_million=input_price,
-        # A missing cached-input price means the model has no cached-input discount.
-        cached_input_per_million=Decimal(cached_input_per_million)
-        if cached_input_per_million is not None
-        else input_price,
-        output_per_million=Decimal(output_per_million),
-    )
-
-
-MODEL_PRICING: dict[str, ModelPricing] = {
-    "chat-latest": _pricing("5.00", "0.50", "30.00"),
-    "gpt-5.5": _pricing("5.00", "0.50", "30.00"),
-    "gpt-5.5-pro": _pricing("30.00", None, "180.00"),
-    "gpt-5.4": _pricing("2.50", "0.25", "15.00"),
-    "gpt-5.4-mini": _pricing("0.75", "0.075", "4.50"),
-    "gpt-5.4-nano": _pricing("0.20", "0.02", "1.25"),
-    "gpt-5.4-pro": _pricing("30.00", None, "180.00"),
-    "gpt-5.3-codex": _pricing("1.75", "0.175", "14.00"),
-    "gpt-5.2": _pricing("1.75", "0.175", "14.00"),
-    "gpt-5.2-chat-latest": _pricing("1.75", "0.175", "14.00"),
-    "gpt-5.2-codex": _pricing("1.75", "0.175", "14.00"),
-    "gpt-5.2-pro": _pricing("21.00", None, "168.00"),
-    "gpt-5.1": _pricing("1.25", "0.125", "10.00"),
-    "gpt-5.1-chat-latest": _pricing("1.25", "0.125", "10.00"),
-    "gpt-5.1-codex": _pricing("1.25", "0.125", "10.00"),
-    "gpt-5.1-codex-max": _pricing("1.25", "0.125", "10.00"),
-    "gpt-5.1-codex-mini": _pricing("0.25", "0.025", "2.00"),
-    "gpt-5": _pricing("1.25", "0.125", "10.00"),
-    "gpt-5-chat-latest": _pricing("1.25", "0.125", "10.00"),
-    "gpt-5-codex": _pricing("1.25", "0.125", "10.00"),
-    "gpt-5-mini": _pricing("0.25", "0.025", "2.00"),
-    "gpt-5-nano": _pricing("0.05", "0.005", "0.40"),
-    "gpt-5-pro": _pricing("15.00", None, "120.00"),
-    "gpt-4.1": _pricing("2.00", "0.50", "8.00"),
-    "gpt-4.1-mini": _pricing("0.40", "0.10", "1.60"),
-    "gpt-4.1-nano": _pricing("0.10", "0.025", "0.40"),
-    "gpt-4o": _pricing("2.50", "1.25", "10.00"),
-    "gpt-4o-2024-05-13": _pricing("5.00", None, "15.00"),
-    "gpt-4o-mini": _pricing("0.15", "0.075", "0.60"),
-    "gpt-4o-mini-search-preview": _pricing("0.15", None, "0.60"),
-    "gpt-4o-search-preview": _pricing("2.50", None, "10.00"),
-    "gpt-4o-mini-realtime-preview": _pricing("0.60", "0.30", "2.40"),
-    "gpt-4o-realtime-preview": _pricing("5.00", "2.50", "20.00"),
-    "gpt-realtime-2": _pricing("4.00", "0.40", "24.00"),
-    "gpt-realtime-1.5": _pricing("4.00", "0.40", "16.00"),
-    "gpt-realtime-mini": _pricing("0.60", "0.06", "2.40"),
-    "gpt-audio": _pricing("2.50", None, "10.00"),
-    "gpt-audio-mini": _pricing("0.60", None, "2.40"),
-    "gpt-4o-audio-preview": _pricing("2.50", None, "10.00"),
-    "gpt-4o-mini-audio-preview": _pricing("0.15", None, "0.60"),
-    "gpt-5-search-api": _pricing("1.25", "0.125", "10.00"),
-    "codex-mini-latest": _pricing("1.50", "0.375", "6.00"),
-    "computer-use-preview": _pricing("3.00", None, "12.00"),
-    "o1": _pricing("15.00", "7.50", "60.00"),
-    "o1-mini": _pricing("1.10", "0.55", "4.40"),
-    "o1-preview": _pricing("15.00", "7.50", "60.00"),
-    "o1-pro": _pricing("150.00", None, "600.00"),
-    "o3": _pricing("2.00", "0.50", "8.00"),
-    "o3-deep-research": _pricing("10.00", "2.50", "40.00"),
-    "o3-mini": _pricing("1.10", "0.55", "4.40"),
-    "o3-pro": _pricing("20.00", None, "80.00"),
-    "o4-mini": _pricing("1.10", "0.275", "4.40"),
-    "o4-mini-deep-research": _pricing("2.00", "0.50", "8.00"),
-}
-MODEL_PRICING.update(
-    {
-        "gpt-5.5-2026-04-23": MODEL_PRICING["gpt-5.5"],
-        "gpt-5.5-pro-2026-04-23": MODEL_PRICING["gpt-5.5-pro"],
-        "gpt-5.4-2026-03-05": MODEL_PRICING["gpt-5.4"],
-        "gpt-5.4-mini-2026-03-17": MODEL_PRICING["gpt-5.4-mini"],
-        "gpt-5.4-nano-2026-03-17": MODEL_PRICING["gpt-5.4-nano"],
-        "gpt-5.4-pro-2026-03-05": MODEL_PRICING["gpt-5.4-pro"],
-        "gpt-5.2-2025-12-11": MODEL_PRICING["gpt-5.2"],
-        "gpt-5.2-pro-2025-12-11": MODEL_PRICING["gpt-5.2-pro"],
-        "gpt-5.1-2025-11-13": MODEL_PRICING["gpt-5.1"],
-        "gpt-5-2025-08-07": MODEL_PRICING["gpt-5"],
-        "gpt-5-mini-2025-08-07": MODEL_PRICING["gpt-5-mini"],
-        "gpt-5-nano-2025-08-07": MODEL_PRICING["gpt-5-nano"],
-        "gpt-5-pro-2025-10-06": MODEL_PRICING["gpt-5-pro"],
-        "gpt-4.1-2025-04-14": MODEL_PRICING["gpt-4.1"],
-        "gpt-4.1-mini-2025-04-14": MODEL_PRICING["gpt-4.1-mini"],
-        "gpt-4.1-nano-2025-04-14": MODEL_PRICING["gpt-4.1-nano"],
-        "gpt-4o-2024-08-06": MODEL_PRICING["gpt-4o"],
-        "gpt-4o-2024-11-20": MODEL_PRICING["gpt-4o"],
-        "gpt-4o-mini-2024-07-18": MODEL_PRICING["gpt-4o-mini"],
-        "computer-use-preview-2025-03-11": MODEL_PRICING["computer-use-preview"],
-        "o1-2024-12-17": MODEL_PRICING["o1"],
-        "o1-mini-2024-09-12": MODEL_PRICING["o1-mini"],
-        "o1-preview-2024-09-12": MODEL_PRICING["o1-preview"],
-        "o1-pro-2025-03-19": MODEL_PRICING["o1-pro"],
-        "o3-2025-04-16": MODEL_PRICING["o3"],
-        "o3-deep-research-2025-06-26": MODEL_PRICING["o3-deep-research"],
-        "o3-mini-2025-01-31": MODEL_PRICING["o3-mini"],
-        "o3-pro-2025-06-10": MODEL_PRICING["o3-pro"],
-        "o4-mini-2025-04-16": MODEL_PRICING["o4-mini"],
-        "o4-mini-deep-research-2025-06-26": MODEL_PRICING["o4-mini-deep-research"],
-    }
-)
-
-
-def estimate_cost(model: str, usage: TokenUsage) -> CostEstimate:
-    pricing = MODEL_PRICING.get(model)
-    if pricing is None:
-        return CostEstimate(model=model, usage=usage, usd=Decimal("0"), pricing=None)
-
-    usd = (
-        Decimal(usage.billable_input_tokens) * pricing.input_per_million
-        + Decimal(usage.cached_input_tokens) * pricing.cached_input_per_million
-        + Decimal(usage.output_tokens) * pricing.output_per_million
-    ) / Decimal(1_000_000)
-
-    return CostEstimate(
-        model=model, usage=usage, usd=usd.quantize(Decimal("0.000001")), pricing=pricing
-    )
-
-
-def usage_from_codex_session_event(event: dict[str, Any]) -> TokenUsage:
-    payload = event.get("payload")
-    if not isinstance(payload, dict):
-        return TokenUsage()
-    payload = cast(dict[str, Any], payload)
-
-    info = payload.get("info")
-    if not isinstance(info, dict):
-        return TokenUsage()
-    info = cast(dict[str, Any], info)
-
-    raw_usage = info.get("last_token_usage") or info.get("total_token_usage")
-    if not isinstance(raw_usage, dict):
-        return TokenUsage()
-    return TokenUsage.model_validate(raw_usage)
-
-
-def estimate_codex_session_jsonl_cost(path: Path, *, model: str) -> CostEstimate:
-    usage = TokenUsage()
-    if not path.exists():
-        return estimate_cost(model, usage)
-
-    with path.open() as file:
-        for line in file:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(event, dict):
-                typed_event = cast(dict[str, Any], event)
-                if typed_event.get("type") == "event_msg":
-                    usage += usage_from_codex_session_event(typed_event)
-
-    return estimate_cost(model, usage)
 
 
 def _int_value(value: object) -> int:
@@ -807,7 +581,7 @@ class CodexAgent(Agent):
             case ThreadTokenUsageUpdatedNotification() as notification if (
                 notification.turn_id == turn_id
             ):
-                return self._log_event("token_count", notification)
+                return self._token_usage_event(notification)
             case _:
                 _LOGGER.debug(
                     "(%s)(%s) Ignoring Codex event: %s",
@@ -854,6 +628,64 @@ class CodexAgent(Agent):
         if not text and not raw:
             return []
         return [Log(kind=kind, text=text, raw=raw)]
+
+    def _token_usage_event(
+        self, notification: ThreadTokenUsageUpdatedNotification
+    ) -> list[Event]:
+        raw = self._json_model_payload(notification)
+        usage = self._codex_token_usage_from_raw(raw)
+        if usage is None:
+            return []
+        raw_total_tokens = usage.get("total_tokens") or usage.get("totalTokens")
+        return [
+            TokenUsage(
+                provider="openai",
+                model=getattr(self, "_model_name", None),
+                source="thread_token_usage_updated",
+                input_tokens=_int_value(
+                    usage.get("input_tokens") or usage.get("inputTokens")
+                ),
+                cached_input_tokens=_int_value(
+                    usage.get("cached_input_tokens") or usage.get("cachedInputTokens")
+                ),
+                output_tokens=_int_value(
+                    usage.get("output_tokens") or usage.get("outputTokens")
+                ),
+                reasoning_output_tokens=_int_value(
+                    usage.get("reasoning_output_tokens")
+                    or usage.get("reasoningOutputTokens")
+                ),
+                total_tokens=_int_value(raw_total_tokens)
+                if raw_total_tokens is not None
+                else None,
+                raw=raw,
+            )
+        ]
+
+    def _codex_token_usage_from_raw(
+        self, raw: dict[str, object]
+    ) -> dict[str, Any] | None:
+        token_usage = self._first_dict(
+            raw.get("tokenUsage"),
+            raw.get("token_usage"),
+            raw.get("usage"),
+        )
+        usage = self._first_dict(
+            token_usage.get("total"),
+            token_usage.get("total_token_usage"),
+            token_usage.get("last"),
+            token_usage.get("last_token_usage"),
+            token_usage,
+        )
+        if not usage:
+            return None
+        return usage
+
+    def _first_dict(self, *values: object) -> dict[str, Any]:
+        for value in values:
+            if isinstance(value, dict):
+                return cast(dict[str, Any], value)
+        return {}
 
     def _chunk_from_started_item(self, item: object) -> Chunk | None:
         payload = self._thread_item_payload(item)

@@ -60,7 +60,6 @@
             <span class="idx-meta">
               <span class="status status-{{ thread.status }}">{{ thread.status }}</span>
               {% if thread.is_public %}<span class="status status-public">public</span>{% endif %}
-              <span class="mono muted">${{ thread.latest_cost_usd }}</span>
             </span>
             
           </li>
@@ -103,7 +102,6 @@
                     </div>
                     <span class="idx-meta">
                       <span class="status status-{{ thread.status }}">{{ thread.status }}</span>
-                      <span class="mono muted">${{ thread.latest_cost_usd }}</span>
                     </span>
                   </li>
                 {% endfor %}

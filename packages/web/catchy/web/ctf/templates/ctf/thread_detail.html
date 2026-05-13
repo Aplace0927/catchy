@@ -43,7 +43,6 @@
         {% if thread.credential %}
           <span class="muted" style="font-size: 13px;">credential · {{ thread.credential.name }}</span>
         {% endif %}
-        <span class="muted" style="font-size: 13px;">cost · $<span id="cost" class="num">{{ thread.latest_cost_usd }}</span></span>
       </div>
     </div>
     <div class="actions">
@@ -137,13 +136,10 @@
       const eventCount = document.getElementById("event-count");
       const statusNode = document.getElementById("status");
       const statusLabel = document.getElementById("status-label");
-      const costNode = document.getElementById("cost");
       const steerForm = document.getElementById("steer-form");
       const promptableStatuses = new Set(["queued", "running", "waiting", "stopped", "completed"]);
 
       let countSeen = 0;
-      let runningCostUsd = 0;
-      let prevRowCostUsd = 0;
       let lastSequenceSeen = 0;
       let lastEventTime = null;
       let currentAssistantBubble = null;
@@ -151,7 +147,6 @@
       let currentAssistantMeta = null;
       let currentAssistantStartTs = null;
       let currentAssistantEndTs = null;
-      let currentAssistantBaseCostUsd = 0;
       let currentRail = null;
       let currentObservationTerminal = null;
       let currentObservationText = "";
@@ -225,20 +220,6 @@
         catch (e) { return String(value); }
       }
 
-      function parseUsd(value) {
-        if (typeof value === "number" && Number.isFinite(value)) return value;
-        if (typeof value === "string" && value.trim()) {
-          const parsed = parseFloat(value);
-          if (!Number.isNaN(parsed)) return parsed;
-        }
-        return null;
-      }
-
-      function formatDeltaUsd(delta) {
-        const sign = delta >= 0 ? "+" : "−";
-        return `${sign}$${Math.abs(delta).toFixed(4)}`;
-      }
-
       function summarize(ev) {
         const text = (ev.text || "").trim();
         if (!text) return "";
@@ -265,12 +246,12 @@
 
       function tokenStats(ev) {
         const raw = ev.raw;
-        if (!raw || typeof raw !== "object") return { stats: null, costUsd: null };
+        if (!raw || typeof raw !== "object") return { stats: null };
         const payload = raw.payload || raw.message || raw;
         const info = (payload && (payload.info || payload.usage || payload.tokenUsage)) || raw.info || raw.usage || raw.tokenUsage || null;
-        if (!info || typeof info !== "object") return { stats: null, costUsd: null };
+        if (!info || typeof info !== "object") return { stats: null };
         const usage = info.total_token_usage || info.last_token_usage || info.total || info.last || info;
-        if (!usage || typeof usage !== "object") return { stats: null, costUsd: null };
+        if (!usage || typeof usage !== "object") return { stats: null };
         const stats = [];
         const keys = [
           ["input_tokens", "input"],
@@ -294,13 +275,7 @@
             seenLabels.add(label);
           }
         }
-        let costUsd = parseUsd(ev.cost_usd);
-        if (costUsd == null) costUsd = parseUsd(info.usd);
-        if (costUsd == null) costUsd = parseUsd(info.cost);
-        if (costUsd == null) costUsd = parseUsd(raw.cost_usd);
-        if (costUsd == null) costUsd = parseUsd(raw.total_cost_usd);
-        if (costUsd != null) stats.push({ label: "$", value: costUsd.toFixed(4) });
-        return { stats: stats.length ? stats : null, costUsd };
+        return { stats: stats.length ? stats : null };
       }
 
       function ensureRail() {
@@ -313,15 +288,11 @@
       }
 
       function flushAssistantBubble() {
-        if (currentAssistantBubble) {
-          prevRowCostUsd = runningCostUsd;
-        }
         currentAssistantBubble = null;
         currentAssistantText = "";
         currentAssistantMeta = null;
         currentAssistantStartTs = null;
         currentAssistantEndTs = null;
-        currentAssistantBaseCostUsd = runningCostUsd;
       }
 
       function flushObservationTerminal() {
@@ -337,11 +308,8 @@
 
       function updateAssistantMeta() {
         if (!currentAssistantMeta) return;
-        const rowDelta = runningCostUsd - currentAssistantBaseCostUsd;
-        const deltaPart = ` · Δ${formatDeltaUsd(rowDelta)}`;
-        const sumPart = runningCostUsd ? ` · Σ$${runningCostUsd.toFixed(4)}` : "";
         currentAssistantMeta.textContent =
-          `agent · ${fmtTime(currentAssistantStartTs)} → ${fmtTime(currentAssistantEndTs)}${deltaPart}${sumPart}`;
+          `agent · ${fmtTime(currentAssistantStartTs)} → ${fmtTime(currentAssistantEndTs)}`;
       }
 
       function appendAssistantDelta(ev) {
@@ -363,7 +331,6 @@
           currentAssistantMeta = meta;
           currentAssistantStartTs = ev.created_at;
           currentAssistantText = "";
-          currentAssistantBaseCostUsd = prevRowCostUsd;
         }
         currentAssistantEndTs = ev.created_at;
         currentAssistantText += text;
@@ -416,11 +383,7 @@
         bubble.innerHTML = renderMarkdown(ev.text || "");
         const meta = document.createElement("div");
         meta.className = "bubble-meta";
-        const rowDelta = runningCostUsd - prevRowCostUsd;
-        prevRowCostUsd = runningCostUsd;
-        const deltaPart = ` · Δ${formatDeltaUsd(rowDelta)}`;
-        const sumPart = runningCostUsd ? ` · Σ$${runningCostUsd.toFixed(4)}` : "";
-        meta.textContent = `you · ${fmtTime(ev.created_at)}${deltaPart}${sumPart}`;
+        meta.textContent = `you · ${fmtTime(ev.created_at)}`;
         row.appendChild(bubble);
         row.appendChild(meta);
         timeline.appendChild(row);
@@ -465,10 +428,6 @@
         header.appendChild(summary);
 
         const stats = tokenStats(ev);
-        if (stats.costUsd != null) runningCostUsd = stats.costUsd;
-        const rowDelta = runningCostUsd - prevRowCostUsd;
-        prevRowCostUsd = runningCostUsd;
-
         const statsToShow = stats.stats ? [...stats.stats] : [];
         const dt = fmtDelta(lastEventTime, ev.created_at);
         if (dt) {
@@ -476,13 +435,6 @@
           dur.className = "trace-duration";
           dur.textContent = dt;
           header.appendChild(dur);
-        }
-        statsToShow.push({
-          label: "Δ$",
-          value: formatDeltaUsd(rowDelta).replace("$", ""),
-        });
-        if (runningCostUsd) {
-          statsToShow.push({ label: "Σ$", value: runningCostUsd.toFixed(4) });
         }
         if (statsToShow.length) {
           const wrap = document.createElement("span");
@@ -561,18 +513,6 @@
 
       sse.addEventListener("stream", (message) => {
         renderEvent(JSON.parse(message.data));
-      });
-
-      sse.addEventListener("cost", (message) => {
-        const payload = JSON.parse(message.data);
-        if (payload.cost && Object.prototype.hasOwnProperty.call(payload.cost, "usd")) {
-          const v = parseUsd(payload.cost.usd);
-          if (v != null) {
-            runningCostUsd = v;
-            costNode.textContent = payload.cost.usd;
-            updateAssistantMeta();
-          }
-        }
       });
 
       sse.addEventListener("status", (message) => {

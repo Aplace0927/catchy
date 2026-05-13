@@ -20,6 +20,7 @@ from catchy.core.agents.models import (
     Nop,
     Steer,
     Stop,
+    TokenUsage,
 )
 from catchy.core.agents.protocols import Agent
 from catchy.core.challenge.models import Challenge as CoreChallenge
@@ -644,11 +645,52 @@ class StreamEventRecordingTests(TestCase):
             },
         )
         self.thread.refresh_from_db()
+        self.assertEqual(self.thread.latest_cost["provider"], "openai")
+        self.assertEqual(self.thread.latest_cost["model"], "gpt-5.5")
         self.assertEqual(self.thread.latest_cost["input_tokens"], 1)
         self.assertEqual(self.thread.latest_cost["cached_input_tokens"], 0)
         self.assertEqual(self.thread.latest_cost["output_tokens"], 2)
-        self.assertEqual(self.thread.latest_cost_usd, Decimal("0.000065"))
+        self.assertEqual(self.thread.latest_cost["usd"], "0")
+        self.assertEqual(self.thread.latest_cost_usd, Decimal("0"))
         self.assertEqual(ThreadCostSnapshot.objects.count(), 1)
+
+    def test_record_stream_event_persists_standard_token_usage_event(self) -> None:
+        services._record_stream_event(
+            self.thread.pk,
+            TokenUsage(
+                provider="openai",
+                model="gpt-5.5",
+                source="thread_token_usage_updated",
+                input_tokens=1,
+                output_tokens=2,
+                raw={"turnId": "turn-1"},
+            ),
+            "fallback-model",
+        )
+
+        event = StreamEvent.objects.get(thread=self.thread)
+        self.assertEqual(event.source, "agent_stream")
+        self.assertEqual(event.kind, "token_count")
+        self.assertEqual(
+            event.raw,
+            {
+                "provider": "openai",
+                "model": "gpt-5.5",
+                "source": "thread_token_usage_updated",
+                "usage": {
+                    "input_tokens": 1,
+                    "output_tokens": 2,
+                    "total_tokens": 3,
+                },
+                "raw": {"turnId": "turn-1"},
+            },
+        )
+        self.assertNotIn("pricing", event.raw)
+        self.assertNotIn("usd", event.raw)
+        self.thread.refresh_from_db()
+        self.assertEqual(self.thread.latest_cost["model"], "gpt-5.5")
+        self.assertEqual(self.thread.latest_cost["input_tokens"], 1)
+        self.assertEqual(self.thread.latest_cost["output_tokens"], 2)
 
     def test_record_stream_event_persists_item_termination(self) -> None:
         services._record_stream_event(
@@ -671,7 +713,6 @@ class StreamEventRecordingTests(TestCase):
                 raw={
                     "provider": "anthropic",
                     "source": "result_message",
-                    "cost_usd": 0.123456,
                     "usage": {
                         "input_tokens": 10,
                         "cache_creation_input_tokens": 3,
@@ -694,15 +735,56 @@ class StreamEventRecordingTests(TestCase):
                 "provider": "anthropic",
                 "model": "claude-sonnet-4-5",
                 "input_tokens": 10,
+                "cached_input_tokens": 0,
                 "cache_creation_input_tokens": 3,
                 "cache_read_input_tokens": 2,
                 "output_tokens": 5,
+                "reasoning_output_tokens": 0,
                 "total_tokens": 20,
-                "usd": "0.123456",
+                "usd": "0",
             },
         )
-        self.assertEqual(self.thread.latest_cost_usd, Decimal("0.123456"))
+        self.assertEqual(self.thread.latest_cost_usd, Decimal("0"))
         self.assertEqual(ThreadCostSnapshot.objects.count(), 1)
+
+    def test_record_stream_event_persists_standard_claude_token_usage_event(
+        self,
+    ) -> None:
+        services._record_stream_event(
+            self.thread.pk,
+            TokenUsage(
+                provider="anthropic",
+                model="claude-sonnet-4-5",
+                source="result_message",
+                input_tokens=10,
+                cache_creation_input_tokens=3,
+                cache_read_input_tokens=2,
+                output_tokens=5,
+            ),
+            "fallback-model",
+        )
+
+        event = StreamEvent.objects.get(thread=self.thread)
+        self.assertEqual(event.source, "agent_stream")
+        self.assertEqual(event.kind, "token_count")
+        self.assertEqual(event.raw["provider"], "anthropic")
+        self.assertNotIn("usd", event.raw)
+        self.thread.refresh_from_db()
+        self.assertEqual(
+            self.thread.latest_cost,
+            {
+                "provider": "anthropic",
+                "model": "claude-sonnet-4-5",
+                "input_tokens": 10,
+                "cached_input_tokens": 0,
+                "cache_creation_input_tokens": 3,
+                "cache_read_input_tokens": 2,
+                "output_tokens": 5,
+                "reasoning_output_tokens": 0,
+                "total_tokens": 20,
+                "usd": "0",
+            },
+        )
 
     def test_record_stream_event_uses_structured_chunk_tags_as_kind(self) -> None:
         services._record_stream_event(
@@ -1169,70 +1251,8 @@ class PublicThreadAccessTests(TestCase):
             )
             self.assertFalse((target_root / "metadata" / ".codex" / "tmp").exists())
 
-    def test_thread_detail_includes_cumulative_token_count_cost(self) -> None:
-        thread = self._create_thread("costed", is_public=True)
-        thread.latest_cost = {"model": "gpt-5.5"}
-        thread.save(update_fields=["latest_cost", "updated_at"])
-        StreamEvent.objects.create(
-            thread=thread,
-            sequence=1,
-            dedupe_key="token-count",
-            source="codex_jsonl",
-            kind="token_count",
-            text="{}",
-            raw={
-                "type": "event_msg",
-                "payload": {
-                    "type": "token_count",
-                    "info": {
-                        "total_token_usage": {
-                            "input_tokens": 14705,
-                            "cached_input_tokens": 0,
-                            "output_tokens": 165,
-                        }
-                    },
-                },
-            },
-        )
-
-        response = self.client.get(thread.get_absolute_url())
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.context["events_json"][0]["cost_usd"], "0.078475")
-
-    def test_thread_detail_includes_agent_stream_token_count_cost(self) -> None:
-        thread = self._create_thread("stream-costed", is_public=True)
-        thread.latest_cost = {"model": "gpt-5.5"}
-        thread.save(update_fields=["latest_cost", "updated_at"])
-        StreamEvent.objects.create(
-            thread=thread,
-            sequence=1,
-            dedupe_key="stream-token-count",
-            source="agent_stream",
-            kind="token_count",
-            text="{}",
-            raw={
-                "threadId": "thread-1",
-                "turnId": "turn-1",
-                "tokenUsage": {
-                    "total": {
-                        "inputTokens": 14705,
-                        "cachedInputTokens": 0,
-                        "outputTokens": 165,
-                    }
-                },
-            },
-        )
-
-        response = self.client.get(thread.get_absolute_url())
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.context["events_json"][0]["cost_usd"], "0.078475")
-
     def test_thread_stream_starts_after_requested_sequence(self) -> None:
         thread = self._create_thread("stream-after", is_public=True)
-        thread.latest_cost = {"model": "gpt-5.5", "usd": "0.000000"}
-        thread.save(update_fields=["latest_cost", "updated_at"])
         StreamEvent.objects.create(
             thread=thread,
             sequence=1,

@@ -564,8 +564,14 @@ def thread_detail(request: HttpRequest, thread_uuid: UUID) -> HttpResponse:
         Thread.Status.QUEUED,
         Thread.Status.RUNNING,
         Thread.Status.WAITING,
-        Thread.Status.STOPPED,
         Thread.Status.COMPLETED,
+    }
+    stoppable_statuses = {
+        Thread.Status.QUEUED,
+        Thread.Status.RUNNING,
+        Thread.Status.WAITING,
+        Thread.Status.COMPLETED,
+        Thread.Status.FAILED,
     }
     events = list(thread.events.all()[:2000])
     model_name = thread.model.name if thread.model is not None else None
@@ -581,6 +587,8 @@ def thread_detail(request: HttpRequest, thread_uuid: UUID) -> HttpResponse:
             "can_manage_thread": can_manage_thread,
             "can_prompt_thread": can_manage_thread
             and thread.status in promptable_statuses,
+            "can_stop_thread": can_manage_thread
+            and thread.status in stoppable_statuses,
         },
     )
 
@@ -616,7 +624,6 @@ def thread_steer(request: HttpRequest, thread_uuid: UUID) -> HttpResponse:
     prompt_statuses = {
         Thread.Status.QUEUED,
         Thread.Status.WAITING,
-        Thread.Status.STOPPED,
         Thread.Status.COMPLETED,
     }
     if thread.status in active_statuses:
@@ -672,7 +679,6 @@ def thread_stop(request: HttpRequest, thread_uuid: UUID) -> HttpResponse:
 
     if thread.status in {
         Thread.Status.WAITING,
-        Thread.Status.STOPPED,
         Thread.Status.COMPLETED,
         Thread.Status.FAILED,
     }:

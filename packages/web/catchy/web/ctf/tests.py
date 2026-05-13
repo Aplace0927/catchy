@@ -1303,6 +1303,18 @@ class PublicThreadAccessTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertNotContains(response, 'id="steer-form"')
 
+    def test_stopped_thread_detail_hides_interaction_controls(self) -> None:
+        thread = self._create_thread("stopped-detail", is_public=False)
+        thread.status = Thread.Status.STOPPED
+        thread.save(update_fields=["status", "updated_at"])
+        self.client.force_login(self.user)
+
+        response = self.client.get(thread.get_absolute_url())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, 'id="steer-form"')
+        self.assertNotContains(response, ">Stop</button>")
+
     def test_authenticated_user_can_publish_and_unpublish_thread(self) -> None:
         thread = self._create_thread("publishable", is_public=False)
         self.client.force_login(self.user)
@@ -1399,6 +1411,25 @@ class PublicThreadAccessTests(TestCase):
         self.assertFalse(thread.steering_messages.exists())
         start_thread.assert_not_called()
 
+    def test_message_to_stopped_thread_is_rejected(self) -> None:
+        thread = self._create_thread("stopped-prompt", is_public=False)
+        thread.status = Thread.Status.STOPPED
+        thread.thread_root = "/tmp/catchy-existing-thread"
+        thread.save(update_fields=["status", "thread_root", "updated_at"])
+        self.client.force_login(self.user)
+
+        with patch("catchy.web.ctf.views.start_thread") as start_thread:
+            response = self.client.post(
+                reverse("ctf:thread_steer", kwargs={"thread_uuid": thread.uuid}),
+                {"text": "try again"},
+            )
+
+        thread.refresh_from_db()
+        self.assertRedirects(response, thread.get_absolute_url())
+        self.assertEqual(thread.status, Thread.Status.STOPPED)
+        self.assertFalse(thread.steering_messages.exists())
+        start_thread.assert_not_called()
+
     def test_steering_running_thread_does_not_restart_worker(self) -> None:
         thread = self._create_thread("steer-running", is_public=False)
         thread.status = Thread.Status.RUNNING
@@ -1479,6 +1510,22 @@ class PublicThreadAccessTests(TestCase):
             list(thread.events.values_list("source", "kind", "text")),
             [("user", "stop", "")],
         )
+
+    def test_stop_stopped_thread_is_rejected(self) -> None:
+        thread = self._create_thread("stop-stopped", is_public=False)
+        thread.status = Thread.Status.STOPPED
+        thread.save(update_fields=["status", "updated_at"])
+        self.client.force_login(self.user)
+
+        response = self.client.post(
+            reverse("ctf:thread_stop", kwargs={"thread_uuid": thread.uuid})
+        )
+
+        thread.refresh_from_db()
+        self.assertRedirects(response, thread.get_absolute_url())
+        self.assertEqual(thread.status, Thread.Status.STOPPED)
+        self.assertFalse(thread.events.exists())
+        self.assertFalse(thread.steering_messages.exists())
 
     def test_fork_thread_copies_metadata_and_history(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

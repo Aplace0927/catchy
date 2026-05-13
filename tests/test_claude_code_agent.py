@@ -7,8 +7,8 @@ from pathlib import Path
 from typing import Any
 
 from catchy.claude_code import ClaudeCodeAgent
-from catchy.core.agents.models import Chunk, ItemCompleted, Nop
-from claude_agent_sdk import StreamEvent
+from catchy.core.agents.models import Chunk, ItemCompleted, Log, Nop, TurnCompleted
+from claude_agent_sdk import ResultMessage, StreamEvent
 
 
 def test_claude_home_configuration_is_copied_into_container() -> None:
@@ -30,6 +30,20 @@ def test_claude_home_configuration_is_copied_into_container() -> None:
     ]
     settings = json.loads(container.files["settings.json"])
     assert settings == {"permissions": {"allow": [], "deny": []}}
+
+
+def test_prepare_claude_runtime_creates_claude_config_directory() -> None:
+    agent = object.__new__(ClaudeCodeAgent)
+    setattr(agent, "_container_workspace_directory", "/workspace")
+    container = _FakeContainer({})
+
+    agent._prepare_claude_runtime(  # pyright: ignore[reportPrivateUsage]
+        container, "/metadata/.claude"  # pyright: ignore[reportArgumentType]
+    )
+
+    script = container.commands[-1][2]
+    assert 'config_dir=/metadata/.claude' in script
+    assert 'mkdir -p "$config_dir"\nchown -R "$uid:$gid" "$config_dir"' in script
 
 
 def test_claude_cli_wrapper_execs_claude_inside_container(tmp_path: Path) -> None:
@@ -219,6 +233,126 @@ def test_claude_stream_event_handles_ping_and_signature_delta() -> None:
     assert isinstance(ping, Nop)
     assert start == []
     assert isinstance(signature, Nop)
+
+
+def test_claude_stream_event_yields_token_usage_logs() -> None:
+    agent = object.__new__(ClaudeCodeAgent)
+
+    start_events = agent._events_from_stream_event(  # pyright: ignore[reportPrivateUsage]
+        StreamEvent(
+            uuid="event-1",
+            session_id="session-1",
+            event={
+                "type": "message_start",
+                "message": {
+                    "usage": {
+                        "input_tokens": 10,
+                        "cache_read_input_tokens": 2,
+                        "output_tokens": 1,
+                    }
+                },
+            },
+        )
+    )
+    delta_events = agent._events_from_stream_event(  # pyright: ignore[reportPrivateUsage]
+        StreamEvent(
+            uuid="event-2",
+            session_id="session-1",
+            event={
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn"},
+                "usage": {
+                    "input_tokens": 10,
+                    "cache_read_input_tokens": 2,
+                    "output_tokens": 5,
+                },
+            },
+        )
+    )
+
+    assert start_events == [
+        Log(
+            kind="token_count",
+            text='{"input_tokens": 10, "cache_read_input_tokens": 2, "output_tokens": 1}',
+            raw={
+                "provider": "anthropic",
+                "source": "stream_event",
+                "event_type": "message_start",
+                "session_id": "session-1",
+                "usage": {
+                    "input_tokens": 10,
+                    "cache_read_input_tokens": 2,
+                    "output_tokens": 1,
+                },
+            },
+        )
+    ]
+    assert delta_events == [
+        Log(
+            kind="token_count",
+            text='{"input_tokens": 10, "cache_read_input_tokens": 2, "output_tokens": 5}',
+            raw={
+                "provider": "anthropic",
+                "source": "stream_event",
+                "event_type": "message_delta",
+                "session_id": "session-1",
+                "usage": {
+                    "input_tokens": 10,
+                    "cache_read_input_tokens": 2,
+                    "output_tokens": 5,
+                },
+                "stop_reason": "end_turn",
+            },
+        )
+    ]
+
+
+def test_claude_result_message_yields_usage_log_before_turn_completed() -> None:
+    agent = object.__new__(ClaudeCodeAgent)
+
+    events = agent._events_from_message(  # pyright: ignore[reportPrivateUsage]
+        ResultMessage(
+            subtype="success",
+            duration_ms=1200,
+            duration_api_ms=900,
+            is_error=False,
+            num_turns=1,
+            session_id="session-1",
+            stop_reason="end_turn",
+            total_cost_usd=0.123456,
+            usage={
+                "input_tokens": 10,
+                "cache_creation_input_tokens": 3,
+                "cache_read_input_tokens": 2,
+                "output_tokens": 5,
+            },
+        )
+    )
+
+    assert events == [
+        Log(
+            kind="token_count",
+            text='{"input_tokens": 10, "cache_creation_input_tokens": 3, "cache_read_input_tokens": 2, "output_tokens": 5}',
+            raw={
+                "provider": "anthropic",
+                "source": "result_message",
+                "subtype": "success",
+                "session_id": "session-1",
+                "duration_ms": 1200,
+                "duration_api_ms": 900,
+                "num_turns": 1,
+                "usage": {
+                    "input_tokens": 10,
+                    "cache_creation_input_tokens": 3,
+                    "cache_read_input_tokens": 2,
+                    "output_tokens": 5,
+                },
+                "stop_reason": "end_turn",
+                "cost_usd": 0.123456,
+            },
+        ),
+        TurnCompleted(),
+    ]
 
 
 def test_claude_stream_event_yields_server_tool_use() -> None:

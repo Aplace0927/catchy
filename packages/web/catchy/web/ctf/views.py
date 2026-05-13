@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Iterator
+from decimal import Decimal, InvalidOperation
 from typing import Any, TypedDict
 
 from catchy.codex import TokenUsage, estimate_cost
@@ -681,7 +682,13 @@ def _event_payload(
 
 
 def _event_cost_usd(event: StreamEvent, *, cost_model: str | None) -> object | None:
-    if not cost_model or event.source != "codex_jsonl" or event.kind != "token_count":
+    if event.kind == "token_count" and event.raw.get("provider") == "anthropic":
+        return _decimal_value(event.raw.get("cost_usd") or event.raw.get("total_cost_usd"))
+    if (
+        not cost_model
+        or event.kind != "token_count"
+        or event.source not in {"agent_stream", "codex_jsonl"}
+    ):
         return None
     usage = _token_count_total_usage(event.raw)
     if usage is None:
@@ -689,21 +696,51 @@ def _event_cost_usd(event: StreamEvent, *, cost_model: str | None) -> object | N
     return estimate_cost(cost_model, usage).usd
 
 
+def _decimal_value(value: object) -> Decimal | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return Decimal(str(value)).quantize(Decimal("0.000001"))
+    except (InvalidOperation, ValueError):
+        return None
+
+
 def _token_count_total_usage(raw: dict[str, Any]) -> TokenUsage | None:
-    payload = raw.get("payload")
-    if not isinstance(payload, dict):
-        return None
-    info = payload.get("info")
-    if not isinstance(info, dict):
-        return None
-    usage = info.get("total_token_usage") or info.get("last_token_usage")
+    payload = _first_dict(raw.get("payload"), raw.get("message"), raw)
+    info = _first_dict(
+        payload.get("info"),
+        payload.get("usage"),
+        payload.get("tokenUsage"),
+        raw.get("info"),
+        raw.get("usage"),
+        raw.get("tokenUsage"),
+        payload,
+    )
+    usage = _first_dict(
+        info.get("total_token_usage"),
+        info.get("last_token_usage"),
+        info.get("total"),
+        info.get("last"),
+        info,
+    )
     if not isinstance(usage, dict):
         return None
     return TokenUsage(
-        input_tokens=_int_value(usage.get("input_tokens")),
-        cached_input_tokens=_int_value(usage.get("cached_input_tokens")),
-        output_tokens=_int_value(usage.get("output_tokens")),
+        input_tokens=_int_value(usage.get("input_tokens") or usage.get("inputTokens")),
+        cached_input_tokens=_int_value(
+            usage.get("cached_input_tokens") or usage.get("cachedInputTokens")
+        ),
+        output_tokens=_int_value(
+            usage.get("output_tokens") or usage.get("outputTokens")
+        ),
     )
+
+
+def _first_dict(*values: object) -> dict[str, Any]:
+    for value in values:
+        if isinstance(value, dict):
+            return value
+    return {}
 
 
 def _int_value(value: object) -> int:
@@ -724,6 +761,8 @@ def _thread_cost_model(thread: Thread) -> str | None:
         model = latest_cost.get("model")
         if isinstance(model, str) and model:
             return model
+    if thread.model_id and thread.model is not None:
+        return thread.model.name
     return None
 
 

@@ -201,10 +201,11 @@
           return "info";
         }
         if (source === "codex_jsonl") {
-          if (kind === "function_call") return "tool";
-          if (kind === "function_call_output") return "tool-out";
+          if (kind === "function_call" || kind === "local_shell_call" || kind === "custom_tool_call" || kind === "web_search_call") return "tool";
+          if (kind === "function_call_output" || kind === "custom_tool_call_output") return "tool-out";
           if (kind === "token_count") return "metric";
           if (kind === "message") return "success";
+          if (kind === "reasoning") return "info";
           return "info";
         }
         if (source === "claude_jsonl") {
@@ -212,9 +213,9 @@
           return "info";
         }
         if (source === "agent_stream") {
-          if (kind === "tool_use") return "tool";
-          if (kind === "tool_input") return "tool";
-          if (kind === "thinking") return "info";
+          if (kind === "tool_use" || kind === "tool_input" || kind === "tool_progress") return "tool";
+          if (kind === "token_count") return "metric";
+          if (kind === "thinking" || kind === "plan" || kind === "diff" || kind === "terminal_input") return "info";
         }
         return "";
       }
@@ -266,19 +267,25 @@
         const raw = ev.raw;
         if (!raw || typeof raw !== "object") return { stats: null, costUsd: null };
         const payload = raw.payload || raw.message || raw;
-        const info = (payload && (payload.info || payload.usage)) || null;
+        const info = (payload && (payload.info || payload.usage || payload.tokenUsage)) || raw.info || raw.usage || raw.tokenUsage || null;
         if (!info || typeof info !== "object") return { stats: null, costUsd: null };
-        const usage = info.total_token_usage || info.last_token_usage || info;
+        const usage = info.total_token_usage || info.last_token_usage || info.total || info.last || info;
         if (!usage || typeof usage !== "object") return { stats: null, costUsd: null };
         const stats = [];
         const keys = [
           ["input_tokens", "input"],
+          ["inputTokens", "input"],
           ["output_tokens", "output"],
+          ["outputTokens", "output"],
           ["cached_input_tokens", "cached"],
+          ["cachedInputTokens", "cached"],
           ["cache_read_input_tokens", "cached"],
           ["cache_creation_input_tokens", "cache write"],
           ["cached_tokens", "cached"],
           ["total_tokens", "total"],
+          ["totalTokens", "total"],
+          ["reasoning_output_tokens", "reasoning"],
+          ["reasoningOutputTokens", "reasoning"],
         ];
         const seenLabels = new Set();
         for (const [key, label] of keys) {
@@ -290,6 +297,8 @@
         let costUsd = parseUsd(ev.cost_usd);
         if (costUsd == null) costUsd = parseUsd(info.usd);
         if (costUsd == null) costUsd = parseUsd(info.cost);
+        if (costUsd == null) costUsd = parseUsd(raw.cost_usd);
+        if (costUsd == null) costUsd = parseUsd(raw.total_cost_usd);
         if (costUsd != null) stats.push({ label: "$", value: costUsd.toFixed(4) });
         return { stats: stats.length ? stats : null, costUsd };
       }

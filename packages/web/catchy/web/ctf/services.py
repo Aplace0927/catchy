@@ -2,20 +2,21 @@ from __future__ import annotations
 
 import asyncio
 import importlib
-import json
 import shutil
 import threading
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, cast
 
 from asgiref.sync import sync_to_async
-from catchy.codex import estimate_codex_session_jsonl_cost
+from catchy.codex import TokenUsage, estimate_cost
 from catchy.core.agents.models import (
     Chunk,
     Event,
     Interrupt,
     ItemCompleted,
+    Log,
     Nop,
     Prompt,
     Steer,
@@ -329,61 +330,6 @@ def _credential_configuration_for_agent(
             raise ValueError(f"unsupported credential kind: {credential.kind}")
 
 
-def ingest_codex_sessions(thread: Thread, *, model_name: str | None = None) -> None:
-    metadata = thread.metadata_directory
-    if metadata is None:
-        return
-
-    sessions_root = metadata / ".codex" / "sessions"
-    if not sessions_root.exists():
-        return
-
-    session_paths = sorted(sessions_root.glob("**/*.jsonl"))
-    for path in session_paths:
-        _ingest_session_file(thread, path)
-
-    if model_name and session_paths:
-        estimate = estimate_codex_session_jsonl_cost(
-            session_paths[-1], model=model_name
-        )
-        thread.latest_cost_usd = estimate.usd
-        thread.latest_cost = estimate.as_dict()
-        thread.save(update_fields=["latest_cost_usd", "latest_cost", "updated_at"])
-        ThreadCostSnapshot.objects.create(
-            thread=thread,
-            usd=estimate.usd,
-            usage=estimate.as_dict(),
-        )
-
-
-def ingest_claude_sessions(thread: Thread, *, model_name: str | None = None) -> None:
-    metadata = thread.metadata_directory
-    if metadata is None:
-        return
-
-    projects_root = metadata / ".claude" / "projects"
-    if not projects_root.exists():
-        return
-
-    project_paths = sorted(path for path in projects_root.iterdir() if path.is_dir())
-    if not project_paths:
-        return
-
-    session_paths = sorted(project_paths[0].glob("*.jsonl"))
-    if not session_paths:
-        return
-
-    latest_usage = _ingest_claude_usage_file(thread, session_paths[0])
-    if latest_usage is None:
-        return
-
-    thread.latest_cost = _claude_usage_snapshot(
-        latest_usage,
-        model_name=model_name or _thread_model_name(thread),
-    )
-    thread.save(update_fields=["latest_cost", "updated_at"])
-
-
 async def _run_agent_stream(
     *,
     thread_id: int,
@@ -456,6 +402,30 @@ def _record_stream_event(thread_id: int, event: Event, model_name: str) -> None:
                 text=chunk.text,
                 raw={"tag": chunk.tag},
             )
+        case Log() as log:
+            if not log.text and not log.raw:
+                return
+            raw = dict(log.raw)
+            _record_event(
+                thread,
+                source="agent_stream",
+                kind=log.kind,
+                text=log.text,
+                raw=raw,
+            )
+            if log.kind == "token_count":
+                if raw.get("provider") == "anthropic":
+                    _record_claude_token_usage_snapshot(
+                        thread,
+                        model_name=model_name,
+                        raw=raw,
+                    )
+                else:
+                    _record_token_usage_snapshot(
+                        thread,
+                        model_name=model_name,
+                        raw=raw,
+                    )
         case ItemCompleted():
             _record_event(
                 thread,
@@ -463,8 +433,6 @@ def _record_stream_event(thread_id: int, event: Event, model_name: str) -> None:
                 kind="item.terminated",
                 text="",
             )
-            ingest_codex_sessions(thread, model_name=model_name)
-            ingest_claude_sessions(thread, model_name=model_name)
         case TurnCompleted():
             _record_event(
                 thread,
@@ -472,8 +440,6 @@ def _record_stream_event(thread_id: int, event: Event, model_name: str) -> None:
                 kind="turn.completed",
                 text="",
             )
-            ingest_codex_sessions(thread, model_name=model_name)
-            ingest_claude_sessions(thread, model_name=model_name)
         case Nop():
             return
 
@@ -514,87 +480,6 @@ def _pop_next_thread_command(thread_id: int) -> Interrupt:
     return interrupt
 
 
-def _ingest_session_file(thread: Thread, path: Path) -> None:
-    try:
-        relative_path = str(path.relative_to(Path(thread.metadata_path)))
-    except ValueError:
-        relative_path = str(path)
-
-    with path.open() as file:
-        for line_number, line in enumerate(file, start=1):
-            line = line.strip()
-            if not line:
-                continue
-            dedupe_key = f"jsonl:{relative_path}:{line_number}"
-            if StreamEvent.objects.filter(
-                thread=thread, dedupe_key=dedupe_key
-            ).exists():
-                continue
-            try:
-                raw = json.loads(line)
-            except json.JSONDecodeError:
-                raw = {"line": line}
-            kind, text = _summarize_codex_event(raw)
-            if not text:
-                continue
-            _record_event(
-                thread,
-                source="codex_jsonl",
-                kind=kind,
-                text=text,
-                raw=raw if isinstance(raw, dict) else {"value": raw},
-                dedupe_key=dedupe_key,
-            )
-
-
-def _ingest_claude_usage_file(thread: Thread, path: Path) -> dict[str, Any] | None:
-    try:
-        relative_path = str(path.relative_to(Path(thread.metadata_path)))
-    except ValueError:
-        relative_path = str(path)
-
-    latest_usage: dict[str, Any] | None = None
-    with path.open() as file:
-        for line_number, line in enumerate(file, start=1):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                raw = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(raw, dict):
-                continue
-            usage = _claude_message_usage(raw)
-            if usage is None:
-                continue
-            latest_usage = usage
-            dedupe_key = f"claude-jsonl:usage:{relative_path}:{line_number}"
-            if StreamEvent.objects.filter(
-                thread=thread, dedupe_key=dedupe_key
-            ).exists():
-                continue
-            _record_event(
-                thread,
-                source="claude_jsonl",
-                kind="token_count",
-                text=json.dumps(usage, ensure_ascii=False),
-                raw=raw,
-                dedupe_key=dedupe_key,
-            )
-    return latest_usage
-
-
-def _claude_message_usage(raw: dict[str, Any]) -> dict[str, Any] | None:
-    message = raw.get("message")
-    if not isinstance(message, dict):
-        return None
-    usage = message.get("usage")
-    if not isinstance(usage, dict):
-        return None
-    return {str(key): value for key, value in usage.items()}
-
-
 def _claude_usage_snapshot(
     usage: dict[str, Any],
     *,
@@ -632,43 +517,6 @@ def _int_value(value: object) -> int:
     if isinstance(value, str) and value.isdecimal():
         return int(value)
     return 0
-
-
-def _summarize_codex_event(raw: Any) -> tuple[str, str]:
-    if not isinstance(raw, dict):
-        return "raw", str(raw)
-
-    event_type = str(raw.get("type", "event"))
-    payload = raw.get("payload")
-    if not isinstance(payload, dict):
-        return event_type, ""
-
-    if event_type == "response_item":
-        item_type = str(payload.get("type", "response_item"))
-        if item_type == "message":
-            parts = payload.get("content")
-            if isinstance(parts, list):
-                texts = [
-                    str(part.get("text") or part.get("output_text"))
-                    for part in parts
-                    if isinstance(part, dict)
-                    and (part.get("text") or part.get("output_text"))
-                ]
-                return item_type, "\n".join(texts)
-        if item_type in {"function_call", "function_call_output"}:
-            return item_type, json.dumps(payload, ensure_ascii=False)
-        return item_type, ""
-
-    if event_type == "event_msg":
-        payload_type = str(payload.get("type", "event_msg"))
-        message = payload.get("message")
-        if isinstance(message, str):
-            return payload_type, message
-        if payload_type == "token_count":
-            return payload_type, json.dumps(payload.get("info", {}), ensure_ascii=False)
-        return payload_type, ""
-
-    return event_type, ""
 
 
 def _record_event(
@@ -732,6 +580,112 @@ def _thread_model_name(thread: Thread) -> str:
     if isinstance(model, dict) and isinstance(model.get("name"), str):
         return str(model["name"])
     return "unknown"
+
+
+def _record_token_usage_snapshot(
+    thread: Thread,
+    *,
+    model_name: str,
+    raw: dict[str, Any],
+) -> None:
+    usage = _token_usage_from_raw(raw)
+    if usage is None:
+        return
+    estimate = estimate_cost(model_name, usage)
+    thread.latest_cost_usd = estimate.usd
+    thread.latest_cost = estimate.as_dict()
+    thread.save(update_fields=["latest_cost_usd", "latest_cost", "updated_at"])
+    ThreadCostSnapshot.objects.create(
+        thread=thread,
+        usd=estimate.usd,
+        usage=estimate.as_dict(),
+    )
+
+
+def _record_claude_token_usage_snapshot(
+    thread: Thread,
+    *,
+    model_name: str,
+    raw: dict[str, Any],
+) -> None:
+    usage = _claude_usage_from_raw(raw)
+    if usage is None:
+        return
+    snapshot = _claude_usage_snapshot(usage, model_name=model_name)
+    cost_usd = _decimal_value(raw.get("cost_usd") or raw.get("total_cost_usd"))
+    if cost_usd is not None:
+        snapshot["usd"] = str(cost_usd)
+        thread.latest_cost_usd = cost_usd
+    else:
+        thread.latest_cost_usd = Decimal("0")
+    thread.latest_cost = snapshot
+    thread.save(update_fields=["latest_cost_usd", "latest_cost", "updated_at"])
+    ThreadCostSnapshot.objects.create(
+        thread=thread,
+        usd=thread.latest_cost_usd,
+        usage=snapshot,
+    )
+
+
+def _claude_usage_from_raw(raw: dict[str, Any]) -> dict[str, Any] | None:
+    payload = _first_dict(raw.get("payload"), raw.get("message"), raw)
+    usage = _first_dict(
+        payload.get("usage"),
+        payload.get("info"),
+        raw.get("usage"),
+        raw.get("info"),
+        payload,
+    )
+    if not usage:
+        return None
+    return {str(key): value for key, value in usage.items()}
+
+
+def _token_usage_from_raw(raw: dict[str, Any]) -> TokenUsage | None:
+    payload = _first_dict(raw.get("payload"), raw.get("message"), raw)
+    info = _first_dict(
+        payload.get("info"),
+        payload.get("usage"),
+        payload.get("tokenUsage"),
+        raw.get("info"),
+        raw.get("usage"),
+        raw.get("tokenUsage"),
+        payload,
+    )
+    usage = _first_dict(
+        info.get("total_token_usage"),
+        info.get("last_token_usage"),
+        info.get("total"),
+        info.get("last"),
+        info,
+    )
+    if not usage:
+        return None
+    return TokenUsage(
+        input_tokens=_int_value(usage.get("input_tokens") or usage.get("inputTokens")),
+        cached_input_tokens=_int_value(
+            usage.get("cached_input_tokens") or usage.get("cachedInputTokens")
+        ),
+        output_tokens=_int_value(
+            usage.get("output_tokens") or usage.get("outputTokens")
+        ),
+    )
+
+
+def _first_dict(*values: object) -> dict[str, Any]:
+    for value in values:
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
+def _decimal_value(value: object) -> Decimal | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return Decimal(str(value)).quantize(Decimal("0.000001"))
+    except (InvalidOperation, ValueError):
+        return None
 
 
 def _fork_thread_name(thread: Thread) -> str:

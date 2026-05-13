@@ -17,6 +17,7 @@ from catchy.core.agents.models import (
     Event,
     Interrupt,
     ItemCompleted,
+    Log,
     Nop,
     Prompt,
     Steer,
@@ -467,6 +468,7 @@ mkdir -p /etc/sudoers.d
 printf '%s ALL=(ALL) NOPASSWD:ALL\\n' "$user_name" > /etc/sudoers.d/catchy-claude-code
 chmod 0440 /etc/sudoers.d/catchy-claude-code
 
+mkdir -p "$config_dir"
 chown -R "$uid:$gid" "$config_dir"
 """
         script = (
@@ -619,7 +621,11 @@ chown -R "$uid:$gid" "$config_dir"
         if isinstance(message, AssistantMessage):
             if getattr(self, "_saw_stream_event_in_turn", False):
                 return []
-            return self._events_from_assistant_message(message)
+            events = self._events_from_assistant_message(message)
+            usage_log = self._usage_log_from_assistant_message(message)
+            if usage_log is not None:
+                events.append(usage_log)
+            return events
         if isinstance(message, UserMessage):
             return [self._event_from_user_message(message)]
         if isinstance(message, ResultMessage):
@@ -628,7 +634,12 @@ chown -R "$uid:$gid" "$config_dir"
                 raise RuntimeError(
                     f"Claude Code turn failed: {details or message.subtype}"
                 )
-            return [TurnCompleted()]
+            events: list[Event] = []
+            usage_log = self._usage_log_from_result_message(message)
+            if usage_log is not None:
+                events.append(usage_log)
+            events.append(TurnCompleted())
+            return events
         return []
 
     def _event_from_stream_event(self, message: StreamEvent) -> Event:
@@ -644,7 +655,7 @@ chown -R "$uid:$gid" "$config_dir"
             self._stream_blocks = {}
             self._stream_message_usage = self._usage_from_message_start(event)
             self._stream_message_stop_reason = None
-            return []
+            return self._usage_log_from_stream_state(message, event_type=event_type)
 
         if event_type == "ping" or event_type == "message_stop":
             if event_type == "message_stop":
@@ -733,7 +744,7 @@ chown -R "$uid:$gid" "$config_dir"
 
         if event_type == "message_delta":
             self._apply_message_delta(event)
-            return []
+            return self._usage_log_from_stream_state(message, event_type=event_type)
 
         _LOGGER.debug("Ignoring unknown Claude stream event type: %r", event_type)
         return []
@@ -845,6 +856,71 @@ chown -R "$uid:$gid" "$config_dir"
             return {}
         usage = cast(dict[str, object], raw_usage)
         return {str(key): value for key, value in usage.items()}
+
+    def _usage_log_from_stream_state(
+        self,
+        message: StreamEvent,
+        *,
+        event_type: object,
+    ) -> list[Event]:
+        usage = getattr(self, "_stream_message_usage", {})
+        if not isinstance(usage, dict) or not usage:
+            return []
+        typed_usage = cast(dict[object, object], usage)
+        raw: dict[str, object] = {
+            "provider": "anthropic",
+            "source": "stream_event",
+            "event_type": event_type if isinstance(event_type, str) else "event",
+            "session_id": message.session_id,
+            "usage": {str(key): value for key, value in typed_usage.items()},
+        }
+        stop_reason = getattr(self, "_stream_message_stop_reason", None)
+        if isinstance(stop_reason, str):
+            raw["stop_reason"] = stop_reason
+        return [Log(kind="token_count", text=json.dumps(raw["usage"]), raw=raw)]
+
+    def _usage_log_from_assistant_message(
+        self, message: AssistantMessage
+    ) -> Log | None:
+        if not isinstance(message.usage, dict) or not message.usage:
+            return None
+        raw: dict[str, object] = {
+            "provider": "anthropic",
+            "source": "assistant_message",
+            "model": message.model,
+            "usage": {str(key): value for key, value in message.usage.items()},
+        }
+        if message.stop_reason:
+            raw["stop_reason"] = message.stop_reason
+        if message.session_id:
+            raw["session_id"] = message.session_id
+        if message.message_id:
+            raw["message_id"] = message.message_id
+        return Log(kind="token_count", text=json.dumps(raw["usage"]), raw=raw)
+
+    def _usage_log_from_result_message(self, message: ResultMessage) -> Log | None:
+        raw_usage = message.usage or message.model_usage
+        if not isinstance(raw_usage, dict) or not raw_usage:
+            return None
+        raw: dict[str, object] = {
+            "provider": "anthropic",
+            "source": "result_message",
+            "subtype": message.subtype,
+            "session_id": message.session_id,
+            "duration_ms": message.duration_ms,
+            "duration_api_ms": message.duration_api_ms,
+            "num_turns": message.num_turns,
+            "usage": {str(key): value for key, value in raw_usage.items()},
+        }
+        if message.stop_reason:
+            raw["stop_reason"] = message.stop_reason
+        if message.total_cost_usd is not None:
+            raw["cost_usd"] = message.total_cost_usd
+        if isinstance(message.model_usage, dict) and message.model_usage:
+            raw["model_usage"] = {
+                str(key): value for key, value in message.model_usage.items()
+            }
+        return Log(kind="token_count", text=json.dumps(raw["usage"]), raw=raw)
 
     def _stream_error_text(self, event: dict[str, object]) -> str:
         raw_error = event.get("error")

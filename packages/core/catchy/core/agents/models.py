@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class Nop(BaseModel): ...
@@ -11,13 +11,19 @@ class Chunk(BaseModel):
     text: str
 
 
+class Log(BaseModel):
+    kind: str
+    text: str = ""
+    raw: dict[str, object] = Field(default_factory=dict)
+
+
 class ItemCompleted(BaseModel): ...
 
 
 class TurnCompleted(BaseModel): ...
 
 
-Event = Chunk | ItemCompleted | Nop | TurnCompleted
+Event = Chunk | Log | ItemCompleted | Nop | TurnCompleted
 
 
 class Prompt(BaseModel):

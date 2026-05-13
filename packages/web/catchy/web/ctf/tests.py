@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import io
-import json
 import tarfile
 import tempfile
 import zipfile
 from collections.abc import AsyncGenerator
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -16,6 +16,7 @@ from catchy.core.agents.models import (
     Event,
     Interrupt,
     ItemCompleted,
+    Log,
     Nop,
     Steer,
     Stop,
@@ -39,6 +40,7 @@ from catchy.web.ctf.models import (
     SteeringMessage,
     StreamEvent,
     Thread,
+    ThreadCostSnapshot,
 )
 from catchy.web.ctf.source_archives import (
     DownloadedSourceArchive,
@@ -606,107 +608,101 @@ class StreamEventRecordingTests(TestCase):
         self.assertEqual(event.text, "hello")
         self.assertEqual(event.raw, {"tag": "action"})
 
+    def test_record_stream_event_persists_log_event(self) -> None:
+        services._record_stream_event(
+            self.thread.pk,
+            Log(
+                kind="token_count",
+                text='{"total":{"inputTokens":1,"outputTokens":2}}',
+                raw={
+                    "tokenUsage": {
+                        "total": {
+                            "inputTokens": 1,
+                            "cachedInputTokens": 0,
+                            "outputTokens": 2,
+                        }
+                    }
+                },
+            ),
+            "gpt-5.5",
+        )
+
+        event = StreamEvent.objects.get(thread=self.thread)
+        self.assertEqual(event.source, "agent_stream")
+        self.assertEqual(event.kind, "token_count")
+        self.assertEqual(event.text, '{"total":{"inputTokens":1,"outputTokens":2}}')
+        self.assertEqual(
+            event.raw,
+            {
+                "tokenUsage": {
+                    "total": {
+                        "inputTokens": 1,
+                        "cachedInputTokens": 0,
+                        "outputTokens": 2,
+                    }
+                }
+            },
+        )
+        self.thread.refresh_from_db()
+        self.assertEqual(self.thread.latest_cost["input_tokens"], 1)
+        self.assertEqual(self.thread.latest_cost["cached_input_tokens"], 0)
+        self.assertEqual(self.thread.latest_cost["output_tokens"], 2)
+        self.assertEqual(self.thread.latest_cost_usd, Decimal("0.000065"))
+        self.assertEqual(ThreadCostSnapshot.objects.count(), 1)
+
     def test_record_stream_event_persists_item_termination(self) -> None:
-        with (
-            patch("catchy.web.ctf.services.ingest_codex_sessions") as codex_ingest,
-            patch("catchy.web.ctf.services.ingest_claude_sessions") as claude_ingest,
-        ):
-            services._record_stream_event(
-                self.thread.pk,
-                ItemCompleted(),
-                "gpt-5.5",
-            )
+        services._record_stream_event(
+            self.thread.pk,
+            ItemCompleted(),
+            "gpt-5.5",
+        )
 
         event = StreamEvent.objects.get(thread=self.thread)
         self.assertEqual(event.source, "agent_stream")
         self.assertEqual(event.kind, "item.terminated")
         self.assertEqual(event.text, "")
-        codex_ingest.assert_called_once()
-        claude_ingest.assert_called_once()
 
-    def test_ingest_claude_sessions_records_token_usage_from_jsonl(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            metadata = Path(directory) / "metadata"
-            session_path = (
-                metadata
-                / ".claude"
-                / "projects"
-                / "-home-beta-paper-code-retrieval"
-                / "2fe9df96-2071-49e3-bdcb-4ff9f63a17f3.jsonl"
-            )
-            session_path.parent.mkdir(parents=True)
-            session_path.write_text(
-                "\n".join(
-                    json.dumps(value)
-                    for value in [
-                        {
-                            "type": "user",
-                            "message": {
-                                "role": "user",
-                                "content": [{"type": "text", "text": "hello"}],
-                            },
-                        },
-                        {
-                            "type": "assistant",
-                            "message": {
-                                "role": "assistant",
-                                "content": [
-                                    {"type": "text", "text": "streamed already"},
-                                ],
-                                "usage": {
-                                    "input_tokens": 1,
-                                    "cache_creation_input_tokens": 234,
-                                    "cache_read_input_tokens": 19232,
-                                    "output_tokens": 226,
-                                },
-                            },
-                        },
-                    ]
-                )
-                + "\n"
-            )
-            self.thread.metadata_path = str(metadata)
-            self.thread.save(update_fields=["metadata_path", "updated_at"])
-
-            services.ingest_claude_sessions(
-                self.thread,
-                model_name="claude-sonnet-4-5",
-            )
-            services.ingest_claude_sessions(
-                self.thread,
-                model_name="claude-sonnet-4-5",
-            )
+    def test_record_stream_event_persists_claude_usage_log_event(self) -> None:
+        services._record_stream_event(
+            self.thread.pk,
+            Log(
+                kind="token_count",
+                text='{"input_tokens":10,"output_tokens":5}',
+                raw={
+                    "provider": "anthropic",
+                    "source": "result_message",
+                    "cost_usd": 0.123456,
+                    "usage": {
+                        "input_tokens": 10,
+                        "cache_creation_input_tokens": 3,
+                        "cache_read_input_tokens": 2,
+                        "output_tokens": 5,
+                    },
+                },
+            ),
+            "claude-sonnet-4-5",
+        )
 
         event = StreamEvent.objects.get(thread=self.thread)
-        self.assertEqual(event.source, "claude_jsonl")
+        self.assertEqual(event.source, "agent_stream")
         self.assertEqual(event.kind, "token_count")
-        self.assertEqual(
-            json.loads(event.text),
-            {
-                "input_tokens": 1,
-                "cache_creation_input_tokens": 234,
-                "cache_read_input_tokens": 19232,
-                "output_tokens": 226,
-            },
-        )
-        self.assertEqual(
-            event.dedupe_key,
-            "claude-jsonl:usage:.claude/projects/-home-beta-paper-code-retrieval/2fe9df96-2071-49e3-bdcb-4ff9f63a17f3.jsonl:2",
-        )
+        self.assertEqual(event.raw["provider"], "anthropic")
         self.thread.refresh_from_db()
         self.assertEqual(
             self.thread.latest_cost,
             {
                 "provider": "anthropic",
                 "model": "claude-sonnet-4-5",
-                "input_tokens": 1,
-                "cache_creation_input_tokens": 234,
-                "cache_read_input_tokens": 19232,
-                "output_tokens": 226,
-                "total_tokens": 19693,
-                "usd": "0",
+                "input_tokens": 10,
+                "cache_creation_input_tokens": 3,
+                "cache_read_input_tokens": 2,
+                "output_tokens": 5,
+                "total_tokens": 20,
+                "usd": "0.123456",
             },
         )
+        self.assertEqual(self.thread.latest_cost_usd, Decimal("0.123456"))
+        self.assertEqual(ThreadCostSnapshot.objects.count(), 1)
 
     def test_record_stream_event_uses_structured_chunk_tags_as_kind(self) -> None:
         services._record_stream_event(
@@ -1195,6 +1191,35 @@ class PublicThreadAccessTests(TestCase):
                             "output_tokens": 165,
                         }
                     },
+                },
+            },
+        )
+
+        response = self.client.get(thread.get_absolute_url())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["events_json"][0]["cost_usd"], "0.078475")
+
+    def test_thread_detail_includes_agent_stream_token_count_cost(self) -> None:
+        thread = self._create_thread("stream-costed", is_public=True)
+        thread.latest_cost = {"model": "gpt-5.5"}
+        thread.save(update_fields=["latest_cost", "updated_at"])
+        StreamEvent.objects.create(
+            thread=thread,
+            sequence=1,
+            dedupe_key="stream-token-count",
+            source="agent_stream",
+            kind="token_count",
+            text="{}",
+            raw={
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "tokenUsage": {
+                    "total": {
+                        "inputTokens": 14705,
+                        "cachedInputTokens": 0,
+                        "outputTokens": 165,
+                    }
                 },
             },
         )

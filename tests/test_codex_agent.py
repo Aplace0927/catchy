@@ -20,8 +20,19 @@ from docker import DockerClient
 from docker.errors import DockerException
 
 from catchy.codex import CodexAgent
-from catchy.core.agents.models import Chunk
+from catchy.core.agents.models import Chunk, ItemCompleted, Log, TurnCompleted
 from catchy.core.challenge.models import Challenge
+from codex_app_server.generated.v2_all import (
+    AgentMessageDeltaNotification,
+    CommandExecutionOutputDeltaNotification,
+    ErrorNotification,
+    ItemCompletedNotification,
+    ItemStartedNotification,
+    ReasoningTextDeltaNotification,
+    ThreadTokenUsageUpdatedNotification,
+    TurnDiffUpdatedNotification,
+    TurnCompletedNotification,
+)
 
 _CODEX_IMAGE = "ghcr.io/betarixm/catchy-codex:latest"
 _DOCKER_SOCKET = "/var/run/docker.sock"
@@ -117,6 +128,228 @@ def test_invalid_runtime_codex_config_raises_toml_decode_error() -> None:
     with pytest.raises(tomllib.TOMLDecodeError):
         agent._read_container_toml(  # pyright: ignore[reportPrivateUsage]
             container, "/metadata/.codex/config.toml"
+        )
+
+
+def test_codex_notification_yields_agent_and_reasoning_deltas() -> None:
+    agent = object.__new__(CodexAgent)
+    setattr(agent, "_id", "codex-test")
+
+    agent_delta = agent._events_from_codex_notification(  # pyright: ignore[reportPrivateUsage]
+        "item/agentMessage/delta",
+        AgentMessageDeltaNotification.model_validate(
+            {
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "itemId": "item-1",
+                "delta": "hello",
+            }
+        ),
+        turn_id="turn-1",
+        challenge_id="challenge-1",
+    )
+    reasoning_delta = agent._events_from_codex_notification(  # pyright: ignore[reportPrivateUsage]
+        "item/reasoning/textDelta",
+        ReasoningTextDeltaNotification.model_validate(
+            {
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "itemId": "item-2",
+                "contentIndex": 0,
+                "delta": "thinking",
+            }
+        ),
+        turn_id="turn-1",
+        challenge_id="challenge-1",
+    )
+
+    assert agent_delta == [Chunk(tag="action", text="hello")]
+    assert reasoning_delta == [Chunk(tag="thinking", text="thinking")]
+
+
+def test_codex_notification_yields_tool_start_and_completion() -> None:
+    agent = object.__new__(CodexAgent)
+    setattr(agent, "_id", "codex-test")
+
+    started = agent._events_from_codex_notification(  # pyright: ignore[reportPrivateUsage]
+        "item/started",
+        ItemStartedNotification.model_validate(
+            {
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "item": {
+                    "type": "commandExecution",
+                    "id": "item-1",
+                    "command": "pytest -q",
+                    "cwd": "/workspace",
+                    "status": "inProgress",
+                    "commandActions": [],
+                },
+            }
+        ),
+        turn_id="turn-1",
+        challenge_id="challenge-1",
+    )
+    output = agent._events_from_codex_notification(  # pyright: ignore[reportPrivateUsage]
+        "item/commandExecution/outputDelta",
+        CommandExecutionOutputDeltaNotification.model_validate(
+            {
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "itemId": "item-1",
+                "delta": "1 passed",
+            }
+        ),
+        turn_id="turn-1",
+        challenge_id="challenge-1",
+    )
+    completed = agent._events_from_codex_notification(  # pyright: ignore[reportPrivateUsage]
+        "item/completed",
+        ItemCompletedNotification.model_validate(
+            {
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "item": {
+                    "type": "commandExecution",
+                    "id": "item-1",
+                    "command": "pytest -q",
+                    "cwd": "/workspace",
+                    "status": "completed",
+                    "commandActions": [],
+                    "exitCode": 0,
+                    "aggregatedOutput": "1 passed",
+                },
+            }
+        ),
+        turn_id="turn-1",
+        challenge_id="challenge-1",
+    )
+
+    assert started == [
+        Chunk(
+            tag="tool_use",
+            text=json.dumps(
+                {
+                    "type": "commandExecution",
+                    "id": "item-1",
+                    "status": "inProgress",
+                    "command": "pytest -q",
+                    "cwd": "/workspace",
+                    "source": "agent",
+                }
+            ),
+        )
+    ]
+    assert output == [Chunk(tag="observation", text="1 passed")]
+    assert completed == [ItemCompleted()]
+
+
+def test_codex_notification_yields_turn_completed() -> None:
+    agent = object.__new__(CodexAgent)
+    setattr(agent, "_id", "codex-test")
+
+    events = agent._events_from_codex_notification(  # pyright: ignore[reportPrivateUsage]
+        "turn/completed",
+        TurnCompletedNotification.model_validate(
+            {
+                "threadId": "thread-1",
+                "turn": {
+                    "id": "turn-1",
+                    "status": "completed",
+                    "items": [],
+                    "error": None,
+                },
+            }
+        ),
+        turn_id="turn-1",
+        challenge_id="challenge-1",
+    )
+
+    assert events == [TurnCompleted()]
+
+
+def test_codex_notification_yields_structured_log_events() -> None:
+    agent = object.__new__(CodexAgent)
+    setattr(agent, "_id", "codex-test")
+
+    diff_events = agent._events_from_codex_notification(  # pyright: ignore[reportPrivateUsage]
+        "turn/diff/updated",
+        TurnDiffUpdatedNotification.model_validate(
+            {
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "diff": "--- a/file\n+++ b/file\n",
+            }
+        ),
+        turn_id="turn-1",
+        challenge_id="challenge-1",
+    )
+    usage_events = agent._events_from_codex_notification(  # pyright: ignore[reportPrivateUsage]
+        "thread/tokenUsage/updated",
+        ThreadTokenUsageUpdatedNotification.model_validate(
+            {
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "tokenUsage": {
+                    "last": {
+                        "inputTokens": 1,
+                        "cachedInputTokens": 0,
+                        "outputTokens": 2,
+                        "reasoningOutputTokens": 0,
+                        "totalTokens": 3,
+                    },
+                    "total": {
+                        "inputTokens": 5,
+                        "cachedInputTokens": 1,
+                        "outputTokens": 3,
+                        "reasoningOutputTokens": 0,
+                        "totalTokens": 8,
+                    },
+                    "modelContextWindow": 1000,
+                },
+            }
+        ),
+        turn_id="turn-1",
+        challenge_id="challenge-1",
+    )
+
+    assert diff_events == [
+        Log(
+            kind="diff",
+            text="--- a/file\n+++ b/file\n",
+            raw={
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "diff": "--- a/file\n+++ b/file\n",
+            },
+        )
+    ]
+    assert len(usage_events) == 1
+    usage = usage_events[0]
+    assert isinstance(usage, Log)
+    assert usage.kind == "token_count"
+    token_usage = cast(dict[str, Any], usage.raw["tokenUsage"])
+    total = cast(dict[str, Any], token_usage["total"])
+    assert total["inputTokens"] == 5
+
+
+def test_codex_notification_raises_non_retryable_error() -> None:
+    agent = object.__new__(CodexAgent)
+    setattr(agent, "_id", "codex-test")
+
+    with pytest.raises(RuntimeError, match="non-retryable turn error"):
+        agent._events_from_codex_notification(  # pyright: ignore[reportPrivateUsage]
+            "error",
+            ErrorNotification.model_validate(
+                {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "willRetry": False,
+                    "error": {"message": "boom"},
+                }
+            ),
+            turn_id="turn-1",
+            challenge_id="challenge-1",
         )
 
 

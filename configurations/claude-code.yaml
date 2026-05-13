@@ -1,8 +1,8 @@
 id: claude-code
 class: catchy.claude_code.ClaudeCodeAgent
 model:
-  provider: anthropic
   name: claude-haiku-4-5
+credential:
   api_key: ${oc.env:ANTHROPIC_API_KEY}
 directory:
   challenge: /challenge

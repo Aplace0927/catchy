@@ -1,8 +1,8 @@
 id: codex
 class: catchy.codex.CodexAgent
 model:
-  provider: openai
   name: gpt-5.5
+credential:
   api_key: ${oc.env:OPENAI_API_KEY}
 directory:
   challenge: /challenge
